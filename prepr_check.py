@@ -226,13 +226,13 @@ def check_stacklevel(b: Branch):
            "use _stacklevel_outside_bngsim() (class 5; repeated 5 times)")
 
 
-def check_skips(b: Branch):
+def check_skips(b: Branch, python: str):
     """New pytest.skip reasons must be declared (#1653, test_skip_audit)."""
     new = [ln for p, ln in b.added_in(("python/tests/",), (".py",)) if "pytest.skip(" in ln or "skipif(" in ln]
     if not new:
         record("SKIP", "skip reasons declared", "no new skips")
         return
-    r = sh([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "python/tests/test_skip_audit.py"],
+    r = sh([python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "python/tests/test_skip_audit.py"],
            b.repo, timeout=900)
     ok = r.returncode == 0
     record("PASS" if ok else "FAIL", "skip reasons declared",
@@ -352,13 +352,13 @@ def check_ci_legs(b: Branch):
            "ci-path-filters-decide-legs")
 
 
-def check_counts(b: Branch):
+def check_counts(b: Branch, python: str):
     """Collected count against the floor and its slack (ci-test-count-bounds)."""
     env = dict(line.split("=", 1) for line in (b.repo / "ci/test_floors.env").read_text().splitlines()
                if "=" in line and not line.startswith("#"))
     floor = int(env["PYTEST_COLLECTED_FLOOR"])
     slack = int(env["PYTEST_COLLECTED_MAX_SLACK"])
-    r = sh([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "python/tests"],
+    r = sh([python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "python/tests"],
            b.repo, timeout=1200)
     m = re.search(r"(\d+) tests? collected", r.stdout) or re.search(r"^(\d+) tests?", r.stdout, re.M)
     if not m:
@@ -987,7 +987,7 @@ def main():
     check_changelog(b)
     check_untracked_new_files(b)
     check_stacklevel(b)
-    check_skips(b)
+    check_skips(b, python)
     check_strict_xfail(b, a.issue)
     check_scratch_names(b)
     check_bngpath()
@@ -996,7 +996,7 @@ def main():
         check_inflight(b)
     check_ci_legs(b)
     if a.count:
-        check_counts(b)
+        check_counts(b, python)
     if a.main_pkg:
         check_fail_on_main(b, a.main_pkg, a.boot)
     if body:
