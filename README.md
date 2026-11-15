@@ -1,59 +1,146 @@
 # bngsim-preflights
 
-Checks to run on a [lanl/bngsim](https://github.com/lanl/bngsim) branch before opening a pull request. Each one encodes a finding the maintainers made in review of an earlier pull request, so that the same gap is caught before review rather than in it.
+Pre-flight checks for [lanl/bngsim](https://github.com/lanl/bngsim) pull requests.
 
-Two scripts, standard library only, run from the root of a bngsim worktree:
+bngsim's maintainers re-run every claim a pull request makes. When they find a problem, it is rarely the fix itself. It is a test that could not have failed, a sibling code path still wrong, a number in the description that no log supports, or a CI leg that never ran the new tests. This repository turns those review findings into checks that run before a pull request is opened, so the same gap is caught by a script instead of by a reviewer.
 
 | Script | What it does |
 |---|---|
-| `prepr_check.py` | The pre-PR gate: about thirty checks of the branch, its tests and its pull-request description. |
-| `floor_for_branch.py` | What a branch's `PYTEST_COLLECTED_FLOOR` line in `ci/test_floors.env` should read, and which path-filtered CI workflows run its new test files. The sketch behind [lanl/bngsim#1757](https://github.com/lanl/bngsim/issues/1757). Since #1762 replaced the floor with per-file counts, its `--legs` report is the part still in use. |
+| [`prepr_check.py`](prepr_check.py) | The pre-PR gate: 33 checks of a branch, its tests, its evidence and its pull-request description. |
+| [`floor_for_branch.py`](floor_for_branch.py) | Reports which path-filtered CI workflows run a branch's new test files, and works out the old `PYTEST_COLLECTED_FLOOR` line. The sketch behind [#1757](https://github.com/lanl/bngsim/issues/1757). |
 
-## `prepr_check.py`
+Both are single files, standard library only. Run them from the root of a bngsim worktree.
+
+## Quick start
 
 ```bash
-# the branch alone
-python prepr_check.py --issue 1660
+# 1. The branch on its own: fast, no description needed
+python prepr_check.py --issue 1740
 
-# everything, before opening a pull request
-python prepr_check.py --issue N --body pr.md --title "part: change (#N)" \
-    --evidence ~/work/ab-N --main-tree ~/work/bngsim-main \
+# 2. Everything, once the description is drafted
+python prepr_check.py --issue 1740 --body pr.md \
+    --title "convert: replay the actions before generate_network in order (#1740)" \
+    --evidence ~/work/ab-1740 --main-tree ~/work/bngsim-main \
     --full --docs-python ~/work/docsvenv/bin/python
 
-# just before pushing: did anything change since the gate passed?
+# 3. Just before pushing: has anything changed since the gate passed?
 python prepr_check.py --body pr.md --check-stamp
 ```
 
-Every check prints `PASS`, `FAIL`, `WARN` or `SKIP` with its reason, and for a `FAIL` or `WARN` the lesson it comes from. The run exits 1 if any check fails. A run that passes writes a stamp of `HEAD`, the tracked tree and the description; `--check-stamp` exits 1 if any of the three has changed since.
+A run that passes writes a stamp of `HEAD`, the tracked tree and the description. Step 3 exits 1 if any of the three has changed since, so a last-minute edit cannot slip past the gate.
 
-What it checks, in groups:
+## What a run looks like
 
-- **The branch.** It is on the current main; nothing staged deletes a file; a changelog fragment exists for a library change; no new file is left untracked; warnings use the caller's stack level; a new skip's reason is declared; clang-format on the C++ tests; open pull requests that edit the same files.
-- **The tests.** The new tests fail on a build of main (`--main-tree`, which copies each new file into main's own tree, so its data and helper imports resolve as they will there); new-test hygiene (a subprocess with no timeout, an Antimony-only fixture, a literal null device); which path-filtered CI workflows run the new files; whether the Linux run in the evidence covers the test files that exercise what the change touches.
-- **The description** (`--body`). No placeholder is left; the title and sections follow the project's pull-request template; every count in it matches a log in the evidence; each log is newer than the code it ran; the main commit it cites is the current one; the open pull requests it shares files with are named; overclaiming words are listed for a recount.
-- **The pull request, once open.** Every comment and review since the last push has been read (`--thread-read`).
-- **The slow ones** (`--full`). `pre-commit run --all-files`, and `sphinx -W` with `--docs-python`.
+From a real run, on the branch for [#1740](https://github.com/lanl/bngsim/issues/1740) (trimmed):
 
-A closing `MANUAL` list names what no script can decide (sibling code paths, cost at scale, fixtures that can tell right from wrong), to be answered in the description.
+```text
+prepr_check  bngsim-1740  HEAD e091207e  base d2d63f8105  3 files changed
 
-### Arguments worth knowing
+PASS  on current main                    merge base is origin/main
+PASS  changelog fragment                 changelog.d/1740.fixed.md
+PASS  skip reasons declared              2 new skip line(s); test_skip_audit passes
+PASS  CI legs table                      wheels.yml: fires (python/bngsim/convert/__init__.py); names no python test files
+PASS  no placeholders in the body        none outside code
+PASS  body numbers backed by logs        each **N passed** and the mutant count are in 1418 logs
+WARN  main build is current main         bngsim-main-ab is at df2821c4, main at d2d63f81: rebuild it
+PASS  new tests fail on main (main build) test_net_as_generated_add_before_generation.py: 10 failed, 7 passed
+PASS  evidence newer than the code       every suite, Linux, mutant, corpus and timing log is newer than the files it is about
+PASS  Linux run covers the touched tests it runs the whole of python/tests
+PASS  pre-commit --all-files             passed
+PASS  sphinx -W                          passed
+WARN  claims to recount                  8 lines with every/all/never/unchanged/identical/only…
+                                         ↳ class: false or stale claims
 
-- `--evidence DIR` (repeatable): a directory of this change's logs, such as mutants, Docker and suite runs. The worktree's own `*.log` files are always read.
-- `--main-tree DIR`: a built checkout of main, whose `.venv` runs the new tests.
-- `--main-pkg DIR --boot DIR`: the older A/B route, a package directory of main's code and the directory holding the `sitecustomize` that points pytest's workers at it (or set `BNGSIM_AB_BOOT`).
-- `--no-gh`: skip the checks that ask GitHub.
-- `--comment FILE`: lint a drafted pull-request comment and exit.
+MANUAL (answer each in the PR body):
+  [ ] Siblings: every engine/route/loader that reads the same thing ...
+  [ ] Cost at scale: paired interleaved timing vs main on the issue's model AND a large one ...
+
+PASS: 0 failed, 3 warnings, 27 passed
+stamp written: run with --check-stamp (and the same --body) just before pushing
+```
+
+Each line is `PASS`, `FAIL`, `WARN` or `SKIP` with its reason. A `FAIL` or `WARN` also names the lesson it comes from. The run exits 1 if any check fails, and writes no stamp.
+
+## What it checks, and why
+
+Every check exists because the gap it looks for reached a pull request. Some were found by the maintainers in review, and some by the gate's author before review.
+
+### The branch
+
+| Check | It catches | Came from |
+|---|---|---|
+| On current main | A branch whose base is behind main, where main changed files the branch touches | Evidence measured against an old main |
+| Changelog fragment | A library change with no `changelog.d/` entry | CI's fragment check failing after push |
+| Skip reasons declared | A new `pytest.skip("...")` whose reason conftest does not declare, which `test_skip_audit.py` fails on | [#1653](https://github.com/lanl/bngsim/issues/1653) |
+| No fixed stack level | A warning raised with `stacklevel=2`, which points at bngsim's own code when called through another bngsim function | Review of several earlier pull requests |
+| New files tracked | A new file left untracked, so the hooks and the diff skip it | `pre-commit --all-files` reads tracked files only |
+| Overlapping pull requests | Open pull requests that edit the same files, whose merge order the description should state | Conflicts found only at merge |
+
+### The tests
+
+| Check | It catches | Came from |
+|---|---|---|
+| New tests fail on main | A test that passes with or without the fix, and so proves nothing. Each new file is copied into a built main's own tree, run, and removed, so its data and helper imports resolve as they will there | Run from a scratch folder instead, a count overstated how many tests failed on main ([#1712](https://github.com/lanl/bngsim/issues/1712)) |
+| CI legs | `mir.yml` and the Windows workflows run fixed test lists on fixed paths, so a new test file can run on none of them | [#1629](https://github.com/lanl/bngsim/pull/1629) review; a draft for #1756 that misjudged which legs fire |
+| Linux run covers the touched tests | A Docker Linux run whose hand-picked test list leaves out a file that exercises the change. Reads `docker/run_linux.sh` from the evidence | [#1636](https://github.com/lanl/bngsim/issues/1636): the feature's own test file was left out, and failed only in the full suite |
+| New-test hygiene | A `subprocess` call with no timeout, which can hang a CI leg; an Antimony-only fixture; a literal `/dev/null` in C++ | Review findings |
+| Built from this tree | A compiled core older than the C++ in the tree, so the tests ran the wrong code | Results from a stale build |
+
+### The description
+
+| Check | It catches | Came from |
+|---|---|---|
+| No placeholders | A `SUITE_LINE`-style marker left unfilled | A draft that reached the gate with one |
+| Template | A title, `## Review` or `## Testing` section not in the form the project's template asks for | The template in [#1746](https://github.com/lanl/bngsim/pull/1746) |
+| Numbers backed by logs | A count such as **20,468 passed** that no log in the evidence contains | False or stale claims, the most common review finding |
+| Counts match the measured ones | A "fails on main" count that differs from the gate's own run | [#1712](https://github.com/lanl/bngsim/issues/1712) |
+| Evidence newer than the code | A suite, mutant or Linux log older than the last edit to what it tested | Results quoted from before a late edit |
+| Cites the current main | A commit cited as "main" that main has since moved past | Rebases after the evidence was gathered |
+| Claims to recount | Words like *every*, *all*, *never*, *identical*, listed for a manual recount | False or stale claims |
+
+### Once the pull request is open, and the slow ones
+
+| Check | It catches |
+|---|---|
+| Thread read | A comment or review posted since the last push and not yet answered (`--thread-read` says it was read) |
+| `--full` | `pre-commit run --all-files`, and `sphinx -W` with `--docs-python` |
+
+## What it cannot judge
+
+A clean run is not a review. The gate ends with a `MANUAL` list of what no script can decide, each to be answered in the description:
+
+- **Siblings:** does every engine, route and loader that reads the same thing get the fix, or a reason it doesn't need it?
+- **Cost at scale:** has the change been timed against main on a large model, not only the issue's small one?
+- **Fixtures that can tell:** would a plausible wrong implementation give a different number?
+
+And some checks are heuristics. "Linux run covers the touched tests" matches function names and topic words, so it can name a file that is only loosely related; that is why it warns rather than fails.
+
+## Arguments
+
+| Argument | Meaning |
+|---|---|
+| `--issue N` | The issue the branch fixes |
+| `--body FILE` / `--title TEXT` | The drafted pull-request description and title |
+| `--evidence DIR` | A directory of this change's logs: mutants, Docker, suite, timing. Repeatable. The worktree's own `*.log` files are always read |
+| `--main-tree DIR` | A built checkout of main; its `.venv` runs the new tests |
+| `--main-pkg DIR --boot DIR` | The older route: main's package directory, and the directory with the `sitecustomize` that points pytest's workers at it (or set `$BNGSIM_AB_BOOT`) |
+| `--full`, `--docs-python PY` | Also run pre-commit on all files, and `sphinx -W` with that interpreter |
+| `--pr N`, `--thread-read` | The open pull request this branch updates, and that its new comments have been read |
+| `--check-stamp` | Only compare against the last passing run's stamp |
+| `--comment FILE` | Lint a drafted pull-request comment, and exit |
+| `--no-gh` | Skip the checks that ask GitHub |
 
 ## `floor_for_branch.py`
 
 ```bash
-python floor_for_branch.py                     # main's count read from CI (needs gh)
-python floor_for_branch.py --main-count 20506  # or given by hand
-python floor_for_branch.py --legs              # also the filtered-legs report
+python floor_for_branch.py --legs              # the filtered-legs report
+python floor_for_branch.py --main-count 20506  # the floor line, with main's count given by hand
 ```
 
-Nothing is written; the lines to paste are printed.
+Since [#1762](https://github.com/lanl/bngsim/pull/1762) holds each test file to main's own count, pull requests no longer edit `ci/test_floors.env`, so the floor arithmetic is history. The `--legs` report is still useful: it says, for each path-filtered workflow, whether the branch triggers it and how many of the branch's new test files it runs. [#1764](https://github.com/lanl/bngsim/issues/1764) proposes the same warning in CI itself.
 
 ## Requirements
 
-Python 3.10 or later, `git`, and the `gh` CLI for the checks that read GitHub. The test checks need an interpreter with bngsim installed, the worktree's own `.venv` by default, or `--python`. Checks that run BNG2.pl need `BNGPATH` set to an absolute path.
+- Python 3.10 or later, `git`, and the [`gh`](https://cli.github.com/) CLI for the checks that read GitHub.
+- For the test checks, an interpreter with bngsim installed: the worktree's own `.venv` by default, or `--python`.
+- For checks that run BNG2.pl, `BNGPATH` set to an absolute path. A relative one breaks the BioNetGen tests that change directory.
