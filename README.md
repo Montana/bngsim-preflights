@@ -1,6 +1,6 @@
 # bngsim-preflights
 
-Pre-flight checks for [lanl/bngsim](https://github.com/lanl/bngsim) pull requests.
+These are Pre-flight checks I've made for Los Alamos National Laboratories project: [lanl/bngsim](https://github.com/lanl/bngsim) pull requests.
 
 bngsim's maintainers re-run every claim a pull request makes. When they find a problem, it is rarely the fix itself. It is a test that could not have failed, a sibling code path still wrong, a number in the description that no log supports, or a CI leg that never ran the new tests. This repository turns those review findings into checks that run before a pull request is opened, so the same gap is caught by a script instead of by a reviewer.
 
