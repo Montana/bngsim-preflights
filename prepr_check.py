@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
-import io
 import subprocess
 import sys
 import tempfile
@@ -356,7 +356,8 @@ def check_counts(b: Branch):
     """Collected count against the floor and its slack (ci-test-count-bounds)."""
     env = dict(line.split("=", 1) for line in (b.repo / "ci/test_floors.env").read_text().splitlines()
                if "=" in line and not line.startswith("#"))
-    floor = int(env["PYTEST_COLLECTED_FLOOR"]); slack = int(env["PYTEST_COLLECTED_MAX_SLACK"])
+    floor = int(env["PYTEST_COLLECTED_FLOOR"])
+    slack = int(env["PYTEST_COLLECTED_MAX_SLACK"])
     r = sh([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "python/tests"],
            b.repo, timeout=1200)
     m = re.search(r"(\d+) tests? collected", r.stdout) or re.search(r"^(\d+) tests?", r.stdout, re.M)

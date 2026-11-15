@@ -141,6 +141,70 @@ python floor_for_branch.py --main-count 20506  # the floor line, with main's cou
 
 Since [#1762](https://github.com/lanl/bngsim/pull/1762) holds each test file to main's own count, pull requests no longer edit `ci/test_floors.env`, so the floor arithmetic is history. The `--legs` report is still useful: it says, for each path-filtered workflow, whether the branch triggers it and how many of the branch's new test files it runs. [#1764](https://github.com/lanl/bngsim/issues/1764) proposes the same warning in CI itself.
 
+## `mutate.py`
+
+A test that passes on the fix should fail on every way of getting it wrong. `mutate.py` breaks the fix on purpose, one way at a time, and checks that a test fails each time.
+
+```bash
+python mutate.py mutants.json            # every mutant; one line each in mutants.log
+python mutate.py mutants.json --only M3  # just one
+python mutate.py --restore               # undo a run that was killed outright
+```
+
+A mutants file names the test command, an optional build, and each mutant as a `find` and `replace` in one file:
+
+```json
+{
+  "test": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "python/tests/test_x.py"],
+  "mutants": [
+    {"name": "M1 the guard never applied", "file": "python/bngsim/x.py",
+     "find": "if h < 1:", "replace": "if False:"},
+    {"name": "M2 the C++ check dropped", "file": "src/x.cpp", "find": "check(x);", "replace": "",
+     "build": ["python", "scripts/rebuild_editable.py"]}
+  ]
+}
+```
+
+Each verdict is one of these:
+
+- `KILLED`: a test failed.
+- `SURVIVED`: no test catches that mistake.
+- `NOT APPLIED`: `find` does not occur exactly `count` times, usually because the file moved on.
+- `BUILD FAILED`: the build step failed.
+- `TEST ERROR`: pytest did not run the tests.
+
+Files are copied to `.mutate-backup/` before the first edit and put back after every mutant. When the run ends, it checks that every file is byte-for-byte what it was at the start.
+
+## `linux_check.py`
+
+A fix that depends on rounding can pass on Apple Silicon and still fail on CI's x86-64 Linux. `linux_check.py` copies the worktree (without `.venv`, `build` or `.git`) into an x86-64 container, builds it from source there, and runs the tests.
+
+```bash
+python linux_check.py --tests python/tests/test_x.py --out ~/work/ab-123/docker
+python linux_check.py --compare-main ~/work/bngsim-main   # sort each failure: the image's or the change's
+python linux_check.py --restart-docker                    # if Docker answers but starts no container
+python linux_check.py --dry-run                           # print the commands only
+```
+
+Before running anything, it checks that a container actually starts: after an update, Docker Desktop can answer `docker info` and still start nothing. With `--compare-main`, each test file that failed is run again on main in the same image. A test that fails there too fails because of the image (no `.git` in the copy, or the root user), not because of the change. The exit status is 0 only when nothing fails that main passes.
+
+## Install
+
+```bash
+pipx install git+https://github.com/Montana/bngsim-preflights
+```
+
+This installs four commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate` and `bngsim-linux`. Each script also runs on its own with `python <script>.py`.
+
+## Tests
+
+```bash
+python -m pip install ".[test]"
+python -m ruff check . && python -m pytest -q
+```
+
+The tests build small git repositories and projects in temporary directories. Docker is not needed. CI runs them on Linux and macOS, with Python 3.10 and 3.13. The tests were themselves checked with `mutate.py`: 18 mutants of the four scripts, all killed.
+
 ## Requirements
 
 - Python 3.10 or later, `git`, and the [`gh`](https://cli.github.com/) CLI for the checks that read GitHub.

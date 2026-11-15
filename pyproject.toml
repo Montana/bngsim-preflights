@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bngsim-preflights"
+version = "0.1.0"
+description = "Checks to run on a bngsim branch before opening a pull request"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8", "ruff>=0.14"]
+
+[project.scripts]
+bngsim-prepr = "prepr_check:main"
+bngsim-floor = "floor_for_branch:main"
+bngsim-mutate = "mutate:main"
+bngsim-linux = "linux_check:main"
+
+[tool.setuptools]
+py-modules = ["prepr_check", "floor_for_branch", "mutate", "linux_check"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
