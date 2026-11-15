@@ -184,7 +184,7 @@ def legs_report(base: str) -> list[str]:
     return rows or ["no filtered workflow runs on this branch (python-tests runs everything)"]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--main-count", type=int, help="main's collected count, if not read from CI")
     ap.add_argument(
@@ -194,7 +194,18 @@ def main() -> int:
     ap.add_argument("--repo", default="lanl/bngsim")
     ap.add_argument("--issue", default="NNNN", help="this PR's issue, for the history clause")
     ap.add_argument("--legs", action="store_true", help="also report the filtered CI legs")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+
+    b = bounds()
+    if "PYTEST_COLLECTED_FLOOR" not in b:
+        # Since lanl/bngsim#1762 each test file is held to main's own count, and
+        # the floors file has no collected-count line to move.
+        print("ci/test_floors.env has no PYTEST_COLLECTED_FLOOR: no floor line to set")
+        if a.legs:
+            print("\nfiltered CI legs:")
+            for row in legs_report(a.base):
+                print(f"  {row}")
+        return 0
 
     if a.main_count is None:
         count, sha = main_ci_count(a.repo)
@@ -202,7 +213,6 @@ def main() -> int:
         count, sha = a.main_count, a.main_sha
     delta, files = added_tests(a.base)
     total = count + delta
-    b = bounds()
     floor, slack = b["PYTEST_COLLECTED_FLOOR"], b["PYTEST_COLLECTED_MAX_SLACK"]
     n = len(files)
     print(

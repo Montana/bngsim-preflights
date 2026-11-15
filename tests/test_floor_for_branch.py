@@ -150,3 +150,12 @@ def test_the_legs_report_with_no_filtered_workflow_firing(repo):
     assert ffb.legs_report("main") == [
         "no filtered workflow runs on this branch (python-tests runs everything)"
     ]
+
+
+def test_without_a_collected_count_floor_only_the_legs_are_reported(repo, capsys):
+    # lanl/bngsim#1762 removed the collected-count floor; the legs report stays.
+    commit(repo, {"ci/test_floors.env": "KLU_PASSED=120\n", "src/codegen_x.cpp": "int x;\n"})
+    assert ffb.main(["--legs", "--base", "main"]) == 0
+    out = capsys.readouterr().out
+    assert "no PYTEST_COLLECTED_FLOOR" in out
+    assert "mir.yml" in out
