@@ -107,6 +107,22 @@ Every check exists because the gap it looks for reached a pull request. Some wer
 | Thread read | A comment or review posted since the last push and not yet answered (`--thread-read` says it was read) |
 | `--full` | `pre-commit run --all-files`, and `sphinx -W` with `--docs-python` |
 
+### From a review of all 18 open pull requests
+
+A code review of every open pull request at once gave 161 candidate findings, and real regressions in 9 of the 18. Seven of its lessons can be checked by a script:
+
+| Check | It catches | From |
+|---|---|---|
+| No one else pushed | A commit on the pull request's branch that this branch lacks, such as a reviewer's fix. A push from here would be refused, or would drop their work if forced. **FAIL** | #1772 |
+| Untouched readers | Each function the branch changes, with its callers in the package that the branch leaves alone. Each needs a run on the issue's model. | #1763 |
+| Nothing newer than Python 3.10 | `locale.getencoding`, `tomllib`, `datetime.UTC`, `StrEnum`, `typing.Self`, `except*` and others, unless behind a version check. **FAIL** | #1775 |
+| Model math read as the engine reads it | A new `lambdify`, `.evalf()`, `np.rint`/`np.mod`/`np.round` or `% 1` in the package. numpy rounds a half to even and floors `mod`; the engine does neither. | #1800 |
+| Every new test can fail | A new test whose every assertion is negative (`not x`, `== []`, `not in`), which passes whether or not the code ran | #1770, #1763 |
+| BNGPATH resolved | A new test that runs BNG2.pl with `cwd=` and does not resolve `BNGPATH`: a relative one errors instead of skipping | #1768, #1765, #1774 |
+| Changelog claims hold at every site | Each code name in the changelog fragment, and the files holding it that the branch leaves untouched | #1756 |
+
+Run against two of those pull requests as first pushed, the Python 3.10 check fails #1775 for `locale.getencoding`, as the review found. The readers check warns on #1763 but not about the right functions: its regressions came from readers of a function whose *answer* changed while its code did not, which no text search can see.
+
 ## What it cannot judge
 
 A clean run is not a review. The gate ends with a `MANUAL` list of what no script can decide, each to be answered in the description:

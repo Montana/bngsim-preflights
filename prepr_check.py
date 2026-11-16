@@ -31,6 +31,7 @@ script can decide, to be answered in the PR body.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -667,6 +668,269 @@ def check_new_test_hygiene(b: Branch):
            "lessons from #1720, #1680")
 
 
+# ─── the 2026-11-15 review's lessons (all 18 open PRs, 161 findings) ─────────
+
+
+def _pr_for(b: Branch, pr: str | None) -> str | None:
+    """*pr*, or the open PR whose head is this branch."""
+    if pr is not None:
+        return pr
+    mine = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], b.repo).stdout.strip()
+    r = sh(["gh", "pr", "list", "-R", "lanl/bngsim", "--state", "open", "--head", mine, "--json", "number"],
+           b.repo, timeout=60)
+    found = json.loads(r.stdout) if not r.returncode and r.stdout.strip() else []
+    return str(found[0]["number"]) if found else None
+
+
+def check_remote_branch(b: Branch, pr: str | None):
+    """The PR's head holds no commit this branch lacks: someone (a maintainer, a
+    reviewer) pushed to it, and a push from here would drop their work or be
+    refused. #1772: Ely pushed 807e8a7c to the branch; only git's refusal saved it."""
+    pr = _pr_for(b, pr)
+    if pr is None:
+        record("SKIP", "no one else pushed to the PR", "no open PR for this branch yet")
+        return
+    v = sh(["gh", "pr", "view", pr, "-R", "lanl/bngsim", "--json",
+            "headRefOid,headRefName,headRepository,headRepositoryOwner"], b.repo, timeout=60)
+    if v.returncode:
+        record("SKIP", "no one else pushed to the PR", f"#{pr}: gh unavailable")
+        return
+    info = json.loads(v.stdout)
+    head, ref = info["headRefOid"], info["headRefName"]
+    url = f"https://github.com/{info['headRepositoryOwner']['login']}/{info['headRepository']['name']}.git"
+    if sh(["git", "cat-file", "-e", f"{head}^{{commit}}"], b.repo).returncode:
+        sh(["git", "fetch", "-q", url, ref], b.repo, timeout=300)
+    if sh(["git", "cat-file", "-e", f"{head}^{{commit}}"], b.repo).returncode:
+        record("WARN", "no one else pushed to the PR", f"#{pr}: could not fetch its head {head[:8]}", "#1772")
+        return
+    if sh(["git", "merge-base", "--is-ancestor", head, "HEAD"], b.repo).returncode == 0:
+        record("PASS", "no one else pushed to the PR", f"#{pr}'s head {head[:8]} is in this branch")
+        return
+    theirs = sh(["git", "log", "--format=%h %an: %s", f"HEAD..{head}"], b.repo).stdout.strip().splitlines()
+    record("FAIL", "no one else pushed to the PR",
+           f"#{pr} has {len(theirs)} commit(s) this branch lacks: {'; '.join(theirs[:3])}: merge them, never force",
+           "#1772 (Ely's 807e8a7c)")
+
+
+def _functions(text: str) -> list[tuple[str, int, int]]:
+    """(name, first line, last line) of each function in *text*."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    return [(n.name, n.lineno, n.end_lineno or n.lineno) for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def check_untouched_readers(b: Branch):
+    """Each function the branch changes, and its callers in the package that the
+    branch leaves untouched. #1763: the Hill fold went into one reader of the root
+    set, and run_diffrax, steady_state, sensitivity runs, the stop budget and the
+    kink check kept reading the old one: six regressions. Run each on the issue's
+    model, branch against main. It finds callers of changed code only: a function
+    whose code is the same but whose answer changed (#1763's root set, changed by
+    the loader) needs its readers found by hand."""
+    pkg = [f for f in b.files if f.startswith("python/bngsim/") and f.endswith(".py")]
+    changed = set()
+    for f in pkg:
+        p = b.repo / f
+        rows = b.added_at.get(f, set())
+        if not p.is_file() or not rows:
+            continue
+        for name, lo, hi in _functions(p.read_text(errors="replace")):
+            if not name.startswith("__") and any(lo <= r <= hi for r in rows):
+                changed.add(name)
+    if not changed:
+        record("SKIP", "untouched readers of changed functions", "no package function changed")
+        return
+    touched = {f: b.added_at.get(f, set()) for f in pkg}
+    readers: dict[str, set[str]] = {}
+    for p in sorted((b.repo / "python/bngsim").rglob("*.py")):
+        rel = str(p.relative_to(b.repo))
+        text = p.read_text(errors="replace")
+        hits = [n for n in changed if re.search(rf"\b{re.escape(n)}\(", text)]
+        if not hits:
+            continue
+        funcs = _functions(text)
+        for i, line in enumerate(text.splitlines(), 1):
+            for n in hits:
+                if not re.search(rf"\b{re.escape(n)}\(", line) or re.match(rf"\s*(async\s+)?def {re.escape(n)}\(", line):
+                    continue
+                owner = [(lo, hi, fn) for fn, lo, hi in funcs if lo <= i <= hi]
+                lo, hi, fn = max(owner) if owner else (i, i, "<module>")
+                if any(lo <= r <= hi for r in touched.get(rel, ())):
+                    continue  # the branch changed this reader too
+                readers.setdefault(n, set()).add(f"{rel.removeprefix('python/bngsim/')}:{fn}")
+    if not readers:
+        record("PASS", "untouched readers of changed functions",
+               f"{len(changed)} changed; every caller is in code the branch touched")
+        return
+    rows = [f"{n} <- {', '.join(sorted(r)[:4])}{' +' + str(len(r) - 4) if len(r) > 4 else ''}"
+            for n, r in sorted(readers.items())]
+    record("WARN", "untouched readers of changed functions",
+           f"{sum(len(r) for r in readers.values())} untouched caller(s): " + "; ".join(rows[:6]),
+           "#1763 (one reader fixed, five not)")
+
+
+_PY311 = [
+    (r"\blocale\.getencoding\b", "locale.getencoding (3.11; getpreferredencoding(False))"),
+    (r"^\s*(import tomllib|from tomllib\b)", "tomllib (3.11)"),
+    (r"\bdatetime\.UTC\b|from datetime import [^#\n]*\bUTC\b", "datetime.UTC (3.11)"),
+    (r"\bStrEnum\b", "enum.StrEnum (3.11)"),
+    (r"\btyping\.Self\b|from typing import [^#\n]*\bSelf\b", "typing.Self (3.11)"),
+    (r"^\s*except\s*\*", "except* (3.11)"),
+    (r"\bTaskGroup\b", "asyncio.TaskGroup (3.11)"),
+    (r"\bExceptionGroup\b", "ExceptionGroup (3.11)"),
+    (r"\bmath\.(cbrt|exp2)\(", "math.cbrt / math.exp2 (3.11)"),
+    (r"\bhashlib\.file_digest\b", "hashlib.file_digest (3.11)"),
+]
+
+
+def check_py310(b: Branch):
+    """No API newer than Python 3.10, which the package supports (requires-python
+    >= 3.10, cp310 wheels), unless it sits behind a version check. #1775: a test
+    called locale.getencoding(), which 3.10 does not have; every CI leg runs 3.12."""
+    bad, guarded = [], []
+    for p, ln in b.added_in(prefix=("python/",), suffix=(".py",)):
+        for pat, what in _PY311:
+            if re.search(pat, ln):
+                text = (b.repo / p).read_text(errors="replace") if (b.repo / p).is_file() else ""
+                i = text.find(ln.strip())
+                near = text[max(0, i - 300):i]
+                (guarded if ("version_info" in near or "try:" in near) else bad).append(f"{Path(p).name}: {what}")
+    if bad:
+        record("FAIL", "nothing newer than Python 3.10", "; ".join(dict.fromkeys(bad)), "#1775 (locale.getencoding)")
+    elif guarded:
+        record("PASS", "nothing newer than Python 3.10", "behind a version check: " + "; ".join(dict.fromkeys(guarded)))
+    else:
+        record("PASS", "nothing newer than Python 3.10", "none added")
+
+
+_ENGINE_MATH = [
+    (r"\blambdify\(", "lambdify"),
+    (r"\.evalf\(", ".evalf()"),
+    (r"\b(np|numpy)\.(rint|round|around|mod|remainder)\(", "numpy rounding/mod"),
+    (r"%\s*1\b", "% 1"),
+]
+
+
+def check_engine_math(b: Branch):
+    """New numeric evaluation of model math reads it as the engine does. numpy's
+    rint rounds a half to even, its mod is floored, sympy's frac is x - floor(x);
+    the engine's are floor(x + 0.5), fmod and x - trunc(x). #1800: a seed read
+    rint(2.5)*k as 2*k. Each hit: run rint/mod/frac at a half and below zero
+    through it, or route it through _engine_rounding."""
+    hits = []
+    for p, ln in b.added_in(prefix=("python/bngsim/",), suffix=(".py",)):
+        code = ln.split("#", 1)[0]
+        for pat, what in _ENGINE_MATH:
+            if re.search(pat, code):
+                text = (b.repo / p).read_text(errors="replace") if (b.repo / p).is_file() else ""
+                i = text.find(ln.strip())
+                if "_engine_rounding" in text[max(0, i - 400):i + 400] or "_ENGINE_ROUNDING" in text[max(0, i - 400):i + 400]:
+                    continue
+                hits.append(f"{Path(p).name}: {what}")
+    record("WARN" if hits else "PASS", "model math read as the engine reads it",
+           "; ".join(dict.fromkeys(hits)) or "no new numeric evaluation", "#1800 (rint, mod, frac)")
+
+
+def _negative(test: ast.expr) -> bool:
+    """An assertion that holds when nothing happened: not x, x not in y, x == [] / () / None.
+    Not `== 0`: `returncode == 0` checks that something succeeded."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return True
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        op, right = test.ops[0], test.comparators[0]
+        if isinstance(op, (ast.NotIn, ast.IsNot)):
+            return isinstance(op, ast.NotIn) or (isinstance(right, ast.Constant) and right.value is not None)
+        if isinstance(op, (ast.Eq, ast.Is)):
+            empty = (isinstance(right, (ast.List, ast.Tuple, ast.Set, ast.Dict)) and not getattr(right, "elts", getattr(right, "keys", [1]))) \
+                or (isinstance(right, ast.Constant) and (right.value is None or right.value is False or right.value == "")) \
+                or (isinstance(right, ast.Call) and getattr(right.func, "id", "") in ("set", "list", "dict", "tuple") and not right.args)
+            return bool(empty)
+    return False
+
+
+def check_negative_only_tests(b: Branch):
+    """A new test whose every assertion is negative passes whether or not the code
+    ran: give it a positive control. #1770: a `lossy` filter matched no real warning
+    text, so `assert not lossy` could not fail; #1763: a "no such log line" test passed
+    with the roots set or not."""
+    weak = []
+    for f in [f for f in b.files if f.startswith("python/tests/") and f.endswith(".py")]:
+        p = b.repo / f
+        rows = b.added_at.get(f, set())
+        if not p.is_file() or not rows:
+            continue
+        try:
+            tree = ast.parse(p.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef) or not fn.name.startswith("test_"):
+                continue
+            if not any(fn.lineno <= r <= (fn.end_lineno or fn.lineno) for r in rows):
+                continue
+            src = ast.unparse(fn)
+            if "pytest.raises" in src or "pytest.warns" in src or "pytest.approx" in src:
+                continue
+            asserts = [n.test for n in ast.walk(fn) if isinstance(n, ast.Assert)]
+            if asserts and all(_negative(t) for t in asserts):
+                weak.append(f"{Path(f).name}::{fn.name}")
+    record("WARN" if weak else "PASS", "every new test can fail",
+           ("only negative assertions: " + ", ".join(weak[:6])) if weak else "each has a positive assertion",
+           "#1770 (a filter that matched nothing), #1763")
+
+
+def check_test_bngpath(b: Branch):
+    """A new test that runs BNG2.pl in another directory resolves BNGPATH first: a
+    relative one passes the skip check from the repo and then fails under cwd=.
+    #1768, #1765, #1774: each such test errored, not skipped."""
+    bad = []
+    for f in {p for p, _ in b.added_in(prefix=("python/tests/",), suffix=(".py",))}:
+        p = b.repo / f
+        text = p.read_text(errors="replace") if p.is_file() else ""
+        if "BNGPATH" in text and re.search(r"subprocess\.\w+\(", text) and "cwd=" in text \
+                and not re.search(r"BNGPATH[^\n]*\b(resolve|abspath|absolute)\(", text):
+            bad.append(Path(f).name)
+    record("WARN" if bad else "PASS", "BNGPATH resolved before a cwd= subprocess",
+           ", ".join(bad) or "none needed", "#1768, #1765, #1774")
+
+
+def check_docs_claims(b: Branch, issue: str | None):
+    """Each code name the changelog fragment names, and the files that hold it which
+    the branch leaves untouched: the claim must hold there too. #1756: the docs said
+    bngsim honours SUNLOGGER_WARNING_FILENAME; register_roots and two steady-state
+    sites overrode it."""
+    frags = [f for f in b.files if f.startswith("changelog.d/") and f.endswith(".md")
+             and (not issue or Path(f).name.startswith(f"{issue}."))]
+    if not frags:
+        record("SKIP", "changelog claims hold at every site", "no fragment")
+        return
+    text = " ".join((b.repo / f).read_text(errors="replace") for f in frags if (b.repo / f).is_file())
+    names = {m.rstrip("()") for m in re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*(?:\(\))?)`", text)}
+    names = {n.split(".")[-1] for n in names if len(n.split(".")[-1]) > 3}
+    touched = set(b.files)
+    sites: dict[str, list[str]] = {}
+    roots = [b.repo / "python/bngsim", b.repo / "src", b.repo / "include"]
+    files = [p for r in roots if r.is_dir() for p in r.rglob("*") if p.suffix in (".py", ".cpp", ".hpp", ".h")]
+    for n in sorted(names):
+        where = [str(p.relative_to(b.repo)) for p in files
+                 if re.search(rf"\b{re.escape(n)}\b", p.read_text(errors="replace"))]
+        if not where or len(where) > 12:  # absent, or a word too common to point anywhere
+            continue
+        rest = [w for w in where if w not in touched]
+        if rest:
+            sites[n] = rest
+    if not sites:
+        record("PASS", "changelog claims hold at every site", f"{len(names)} name(s); no untouched site holds one")
+        return
+    rows = [f"{n}: {', '.join(Path(w).name for w in ws[:4])}{' +' + str(len(ws) - 4) if len(ws) > 4 else ''}"
+            for n, ws in sites.items()]
+    record("WARN", "changelog claims hold at every site",
+           "read each for the fragment's claim: " + "; ".join(rows[:6]), "#1756 (sibling sites overrode it)")
+
+
 def check_clean_tree(b: Branch):
     """Nothing tracked left uncommitted: a mutant run's leftovers, a stray edit (#1638)."""
     dirty = [ln for ln in sh(["git", "status", "--porcelain", "--untracked-files=no"], b.repo).stdout.splitlines() if ln.strip()]
@@ -1008,6 +1272,12 @@ def main():
         if a.evidence:
             check_evidence(body, a.evidence + sorted(repo.glob("*.log")))
     check_new_test_hygiene(b)
+    check_untouched_readers(b)
+    check_py310(b)
+    check_engine_math(b)
+    check_negative_only_tests(b)
+    check_test_bngpath(b)
+    check_docs_claims(b, a.issue)
     check_clean_tree(b)
     if a.main_tree:
         mt = a.main_tree.resolve()
@@ -1020,6 +1290,7 @@ def main():
         check_build(b, python)
     if not a.no_gh:
         check_thread(b, a.pr, a.thread_read)
+        check_remote_branch(b, a.pr)
         if a.floor:
             check_floor_arithmetic(b, python)
         check_issue_free(b, a.issue, body)

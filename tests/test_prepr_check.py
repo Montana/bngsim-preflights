@@ -7,7 +7,6 @@ so a check that can never fail would be caught here too.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,55 +16,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from _helpers import git, result, write  # noqa: E402, F401
+
 import prepr_check as pc  # noqa: E402
-
-
-def git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=repo, check=True, capture_output=True, text=True, timeout=60
-    ).stdout.strip()
-
-
-def write(repo: Path, files: dict[str, str]) -> None:
-    for rel, text in files.items():
-        path = repo / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-
-
-@pytest.fixture
-def make_branch(tmp_path, monkeypatch):
-    """A repo with `main` holding *base* and a branch adding *head* on top."""
-    pc.RESULTS.clear()
-    pc.STATE.clear()
-
-    def make(base: dict[str, str], head: dict[str, str], *, message: str = "change", commit: bool = True):
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        git(repo, "init", "-q", "-b", "main")
-        git(repo, "config", "user.email", "test@example.invalid")
-        git(repo, "config", "user.name", "test")
-        write(repo, {"README.md": "x\n", **base})
-        git(repo, "add", "-A")
-        git(repo, "commit", "-q", "-m", "base")
-        git(repo, "checkout", "-q", "-b", "fix")
-        write(repo, head)
-        if commit:
-            git(repo, "add", "-A")
-            git(repo, "commit", "-q", "-m", message)
-        return pc.Branch(repo, "main")
-
-    return make
-
-
-def result(name: str) -> tuple[str, str]:
-    """(status, detail) of the one recorded check whose name starts with *name*."""
-    rows = [(s, d) for s, n, d, _ in pc.RESULTS if n.startswith(name)]
-    assert len(rows) == 1, (name, pc.RESULTS)
-    return rows[0]
-
-
-# --- the branch ---------------------------------------------------------------------
 
 
 def test_a_fixed_stacklevel_fails(make_branch):
