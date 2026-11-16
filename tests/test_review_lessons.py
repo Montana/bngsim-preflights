@@ -226,3 +226,66 @@ def test_a_new_parse_after_spell_mod_passes(make_branch):
     b = make_branch({}, {"python/bngsim/_r.py": text})
     pc.check_percent_parse(b)
     assert result("% spelled before")[0] == "PASS"
+
+
+# --- check_review_covers_head ------------------------------------------------------------
+
+
+def _body(review: str) -> str:
+    return f"Fixes #1.\n\n## Review\n\n{review}\n\n## Testing\n\nRan it.\n"
+
+
+def test_code_changed_after_the_reviewed_commit_warns(make_branch):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    reviewed = git(b.repo, "rev-parse", "--short", "HEAD")
+    (b.repo / "python/bngsim/a.py").write_text("x = 2\n")
+    git(b.repo, "commit", "-qam", "a fix after the review")
+    pc.check_review_covers_head(pc.Branch(b.repo, "main"), _body(f"One round of a whole-branch `/code-review` on `{reviewed}`."))
+    status, detail = result("review covers the head")
+    assert status == "WARN" and "a fix after the review" in detail
+
+
+def test_a_review_of_the_head_passes(make_branch):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    head = git(b.repo, "rev-parse", "--short", "HEAD")
+    pc.check_review_covers_head(b, _body(f"Two rounds of a whole-branch `/code-review`. The second, on `{head}`."))
+    assert result("review covers the head")[0] == "PASS"
+
+
+def test_unreviewed_fixes_said_so_pass(make_branch):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    reviewed = git(b.repo, "rev-parse", "--short", "HEAD")
+    (b.repo / "python/bngsim/a.py").write_text("x = 2\n")
+    git(b.repo, "commit", "-qam", "later")
+    body = _body(f"One round on `{reviewed}`. The commit after it has not been reviewed.")
+    pc.check_review_covers_head(pc.Branch(b.repo, "main"), body)
+    assert result("review covers the head")[0] == "PASS"
+
+
+# --- check_writer_corpus -------------------------------------------------------------------
+
+
+def test_a_writer_change_with_no_corpus_log_warns(make_branch, tmp_path):
+    b = make_branch({}, {"python/bngsim/convert/_net_writer.py": "x = 1\n"})
+    pc.check_writer_corpus(b, [tmp_path / "nothing"])
+    assert result("a writer change is checked")[0] == "WARN"
+
+
+def test_a_writer_change_with_a_corpus_log_passes(make_branch, tmp_path):
+    b = make_branch({}, {"python/bngsim/convert/_net_writer.py": "x = 1\n"})
+    ev = tmp_path / "ev"
+    ev.mkdir()
+    (ev / "corpus_fix.log").write_text("corpus: written by both 1291; identical 1214; differ 77\n")
+    pc.check_writer_corpus(b, [ev])
+    assert result("a writer change is checked")[0] == "PASS"
+
+
+def test_the_last_of_several_rounds_is_the_one_that_counts(make_branch):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    first = git(b.repo, "rev-parse", "--short", "HEAD")
+    (b.repo / "python/bngsim/a.py").write_text("x = 2\n")
+    git(b.repo, "commit", "-qam", "round one's fixes")
+    second = git(b.repo, "rev-parse", "--short", "HEAD")
+    body = _body(f"Two rounds. The first, on `{first}`, found 3. A second, on `{second}`, found none.")
+    pc.check_review_covers_head(pc.Branch(b.repo, "main"), body)
+    assert result("review covers the head")[0] == "PASS"

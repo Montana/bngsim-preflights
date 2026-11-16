@@ -986,6 +986,74 @@ def check_percent_parse(b: Branch):
            if bare else "no new parse of model text", "#1809, #1815")
 
 
+_CODE_PATHS = ("python/bngsim", "src", "include", "ci")
+
+
+def check_review_covers_head(b: Branch, body: str):
+    """The code the PR holds is the code a review round read. Fixes made after the
+    last reviewed commit are unreviewed: #1809's round on its fixes found a
+    regression they introduced, and #1791's found three gaps. Run a round on the
+    fixes, or say in the description that they were not reviewed."""
+    m = re.search(r"^## Review\s*\n(.*?)(?=^## |\Z)", body, re.S | re.M)
+    section = m.group(1) if m else ""
+    rounds = re.findall(r"\bon `([0-9a-f]{7,40})`", section)
+    if not rounds:
+        record("SKIP", "review covers the head", "no review round names a commit")
+        return
+    last = None
+    for sha in rounds:  # the latest of the reviewed commits on this branch
+        if sh(["git", "merge-base", "--is-ancestor", sha, "HEAD"], b.repo).returncode:
+            continue
+        if last is None or sh(["git", "merge-base", "--is-ancestor", last, sha], b.repo).returncode == 0:
+            last = sha
+    if last is None:
+        record("WARN", "review covers the head", f"no reviewed commit ({', '.join(rounds)}) is on this branch",
+               "#1809, #1791")
+        return
+    after = sh(["git", "log", "--format=%h %s", f"{last}..HEAD", "--", *_CODE_PATHS], b.repo).stdout.split("\n")
+    after = [ln for ln in after if ln.strip()]
+    if not after:
+        record("PASS", "review covers the head", f"no code changed after the last reviewed commit {last[:8]}")
+        return
+    if re.search(r"not (been )?reviewed|unreviewed|no round (has )?read", section, re.I):
+        record("PASS", "review covers the head",
+               f"{len(after)} commit(s) after {last[:8]}, and the Review section says so")
+        return
+    record("WARN", "review covers the head",
+           f"{len(after)} commit(s) changed code after the last reviewed commit {last[:8]} "
+           f"({'; '.join(after[:3])}): run a round on the fixes, or say they were not reviewed",
+           "#1809 (a regression in round 1's fix), #1791")
+
+
+_WRITERS = re.compile(r"^python/bngsim/convert/(_\w*writer\w*\.py|__init__\.py|_sedml\.py|_protocol\.py)$")
+
+
+def check_writer_corpus(b: Branch, evidence: list[Path] | None):
+    """A change to a file writer is compared with main's, byte for byte, over a
+    corpus: how many files are identical, how many changed, and that none changed
+    without cause. #1791: reusing the codegen's sort rewrote 521 of 1291 files
+    with nothing wrong; only the corpus showed it."""
+    writers = [f for f in b.files if _WRITERS.match(f)]
+    if not writers:
+        record("SKIP", "a writer change is checked on a corpus", "no writer changed")
+        return
+    text = ""
+    for d in evidence or []:
+        for f in (d.rglob("*") if d.is_dir() else [d]):
+            if f.is_file() and f.suffix in (".log", ".txt", ".md") and f.stat().st_size < 50_000_000:
+                try:
+                    text += f.read_text(errors="replace") + "\n"
+                except OSError:
+                    pass
+    if re.search(r"\bidentical\s+\d+|\b\d+\s+(byte-)?identical\b", text, re.I) and re.search(r"\bcorpus\b", text, re.I):
+        record("PASS", "a writer change is checked on a corpus", "an evidence log counts identical files over a corpus")
+        return
+    record("WARN", "a writer change is checked on a corpus",
+           f"{', '.join(Path(w).name for w in writers)} changed and no evidence log counts identical "
+           "files over a corpus: write a corpus with main and with this branch and compare them",
+           "#1791 (521 files rewritten for nothing)")
+
+
 def check_clean_tree(b: Branch):
     """Nothing tracked left uncommitted: a mutant run's leftovers, a stray edit (#1638)."""
     dirty = [ln for ln in sh(["git", "status", "--porcelain", "--untracked-files=no"], b.repo).stdout.splitlines() if ln.strip()]
@@ -1335,6 +1403,9 @@ def main():
     check_docs_claims(b, a.issue)
     check_binding_order(b)
     check_percent_parse(b)
+    check_writer_corpus(b, a.evidence)
+    if body:
+        check_review_covers_head(b, body)
     check_clean_tree(b)
     if a.main_tree:
         mt = a.main_tree.resolve()
