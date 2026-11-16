@@ -109,7 +109,7 @@ Every check exists because the gap it looks for reached a pull request. Some wer
 
 ### From a review of all 18 open pull requests
 
-A code review of every open pull request at once gave 161 candidate findings, and real regressions in 9 of the 18. Seven of its lessons can be checked by a script:
+A code review of every open pull request at once gave 161 candidate findings, and real regressions in 9 of the 18. Nine of its lessons can be checked by a script:
 
 | Check | It catches | From |
 |---|---|---|
@@ -120,6 +120,8 @@ A code review of every open pull request at once gave 161 candidate findings, an
 | Every new test can fail | A new test whose every assertion is negative (`not x`, `== []`, `not in`), which passes whether or not the code ran | #1770, #1763 |
 | BNGPATH resolved | A new test that runs BNG2.pl with `cwd=` and does not resolve `BNGPATH`: a relative one errors instead of skipping | #1768, #1765, #1774 |
 | Changelog claims hold at every site | Each code name in the changelog fragment, and the files holding it that the branch leaves untouched | #1756 |
+| Parse bindings before the model's names | A `local_dict.update(...)` added after the model's own names, which shadows a parameter of that name | #1809 |
+| `%` spelled before a new parse | A new `parse_expr`/`sympify` with no `_spell_mod` in reach: sympy reads `%` as its floored `Mod` and folds it | #1809, #1815 |
 
 Run against two of those pull requests as first pushed, the Python 3.10 check fails #1775 for `locale.getencoding`, as the review found. The readers check warns on #1763 but not about the right functions: its regressions came from readers of a function whose *answer* changed while its code did not, which no text search can see.
 

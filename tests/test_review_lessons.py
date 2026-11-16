@@ -183,3 +183,46 @@ def test_a_success_check_is_positive(make_branch):
     b = make_branch({}, {"python/tests/test_r.py": text})
     pc.check_negative_only_tests(b)
     assert result("every new test can fail")[0] == "PASS"
+
+
+# --- check_binding_order ---------------------------------------------------------------
+
+PREP = '''def prepare(sym_map, local_dict):
+    local_dict.update(round_bindings())
+    local_dict.update(sym_map)
+    local_dict.update(Piecewise=Piecewise)
+'''
+
+
+def test_a_binding_after_the_models_names_warns(make_branch):
+    late = PREP + "    local_dict.update(rounding_bindings())\n"
+    b = make_branch({"python/bngsim/_p.py": PREP}, {"python/bngsim/_p.py": late})
+    pc.check_binding_order(b)
+    status, detail = result("parse bindings before")
+    assert status == "WARN" and "_p.py:5 in prepare" in detail
+
+
+def test_a_binding_before_the_models_names_passes(make_branch):
+    early = PREP.replace("    local_dict.update(sym_map)\n",
+                         "    local_dict.update(rounding_bindings())\n    local_dict.update(sym_map)\n")
+    b = make_branch({"python/bngsim/_p.py": PREP}, {"python/bngsim/_p.py": early})
+    pc.check_binding_order(b)
+    assert result("parse bindings before")[0] == "PASS"
+
+
+# --- check_percent_parse ---------------------------------------------------------------
+
+
+def test_a_new_parse_with_no_spell_mod_warns(make_branch):
+    text = "from sympy import parse_expr\n\ndef read(s):\n    return parse_expr(s)\n"
+    b = make_branch({}, {"python/bngsim/_r.py": text})
+    pc.check_percent_parse(b)
+    status, detail = result("% spelled before")
+    assert status == "WARN" and "parse_expr(s)" in detail
+
+
+def test_a_new_parse_after_spell_mod_passes(make_branch):
+    text = "from sympy import parse_expr\n\ndef read(s):\n    return parse_expr(_spell_mod(s))\n"
+    b = make_branch({}, {"python/bngsim/_r.py": text})
+    pc.check_percent_parse(b)
+    assert result("% spelled before")[0] == "PASS"

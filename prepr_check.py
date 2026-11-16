@@ -936,6 +936,56 @@ def check_docs_claims(b: Branch, issue: str | None):
            "read each for the fragment's claim: " + "; ".join(rows[:6]), "#1756 (sibling sites overrode it)")
 
 
+def check_binding_order(b: Branch):
+    """A parse binding added after the model's own names shadows a parameter of
+    that name. #1809: rint, mod and frac were bound after
+    `local_dict.update(sym_map)`, so a parameter named `frac` became the function
+    and `frac*k` no longer parsed, where main had it. Bind before the model's
+    names, as round() is (#684)."""
+    late = []
+    for f in [f for f in b.files if f.startswith("python/bngsim/") and f.endswith(".py")]:
+        p = b.repo / f
+        rows = b.added_at.get(f, set())
+        if not p.is_file() or not rows:
+            continue
+        lines = p.read_text(errors="replace").splitlines()
+        for name, lo, hi in _functions("\n".join(lines)):
+            body = lines[lo - 1:hi]
+            model = [i for i, ln in enumerate(body, lo) if re.search(r"local_dict\.update\(\s*sym_map\b", ln)
+                     or re.search(r"local_dict\s*\[\s*\w+\s*\]\s*=\s*sp\.Symbol", ln)]
+            if not model:
+                continue
+            first = min(model)
+            for i, ln in enumerate(body, lo):
+                if i > first and i in rows and re.search(r"local_dict\.update\(", ln) \
+                        and not re.search(r"sym_map|Piecewise=|And=", ln):
+                    late.append(f"{Path(f).name}:{i} in {name}")
+    record("WARN" if late else "PASS", "parse bindings before the model's names",
+           ("bound after the model's names, so a parameter of that name is shadowed: " + ", ".join(late))
+           if late else "none added after them", "#1809 (a parameter named frac)")
+
+
+def check_percent_parse(b: Branch):
+    """A new parse of model text spells ExprTk's `%` (fmod) first. sympy parses
+    `%` as its floored Mod and folds or simplifies it at once: `-2.5 % 2` reads
+    1.5 for -0.5, `(p + 2) % 2` reads Mod(p, 2). #1809's second review; #1815 is
+    the rate-law parse's case. `_spell_mod` (#1127) writes `a % b` as mod(a, b)."""
+    bare = []
+    for p, ln in b.added_in(prefix=("python/bngsim/",), suffix=(".py",)):
+        code = ln.split("#", 1)[0]
+        if not re.search(r"\b(parse_expr|sympify|parse_expr_cached)\(", code):
+            continue
+        text = (b.repo / p).read_text(errors="replace") if (b.repo / p).is_file() else ""
+        owner = [(lo, hi, fn) for fn, lo, hi in _functions(text) if any(
+            lo <= r <= hi and code.strip() in text.splitlines()[r - 1] for r in b.added_at.get(p, ()))]
+        scope = "\n".join(text.splitlines()[owner[0][0] - 1:owner[0][1]]) if owner else text
+        if "_spell_mod" not in scope and "%" not in code:
+            bare.append(f"{Path(p).name}: {code.strip()[:60]}")
+    record("WARN" if bare else "PASS", "% spelled before a new parse",
+           ("parses with no _spell_mod in reach (is the text model math?): " + "; ".join(dict.fromkeys(bare)))
+           if bare else "no new parse of model text", "#1809, #1815")
+
+
 def check_clean_tree(b: Branch):
     """Nothing tracked left uncommitted: a mutant run's leftovers, a stray edit (#1638)."""
     dirty = [ln for ln in sh(["git", "status", "--porcelain", "--untracked-files=no"], b.repo).stdout.splitlines() if ln.strip()]
@@ -1283,6 +1333,8 @@ def main():
     check_negative_only_tests(b)
     check_test_bngpath(b)
     check_docs_claims(b, a.issue)
+    check_binding_order(b)
+    check_percent_parse(b)
     check_clean_tree(b)
     if a.main_tree:
         mt = a.main_tree.resolve()
