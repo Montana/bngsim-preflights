@@ -242,3 +242,47 @@ def test_a_plain_thank_you_is_not_flagged(tmp_path):
     path = tmp_path / "reply.md"
     path.write_text("Thank you, that makes sense.\n")
     assert pc.lint_comment(path) == []
+
+
+def test_a_review_round_reported_without_a_label_is_a_form():
+    pc.RESULTS.clear()
+    body = GOOD_BODY.replace(
+        "**Not reviewed.** This PR needs `/code-review` before it merges.",
+        "One round of a whole-branch `/code-review` on `ae2ffa96`. It returned 3 findings; "
+        "`9cd18bd3` fixes them.",
+    )
+    pc.check_template(body, "parser: read x as y (#1)")
+    assert result("PR template")[0] == "PASS"
+
+
+def test_a_review_round_with_no_commit_named_is_not_a_form():
+    pc.RESULTS.clear()
+    body = GOOD_BODY.replace(
+        "**Not reviewed.** This PR needs `/code-review` before it merges.",
+        "One round of a whole-branch `/code-review`. It went fine.",
+    )
+    pc.check_template(body, "parser: read x as y (#1)")
+    assert result("PR template")[0] == "FAIL"
+
+
+def _mutant_evidence(tmp_path, log_text):
+    d = tmp_path / "evidence"
+    d.mkdir()
+    (d / "mutants_r2.json").write_text('{"mutants": []}')  # the definitions: no verdicts
+    (d / "mutants_r2.log").write_text(log_text)
+    return [d]
+
+
+def test_mutants_of_any_name_and_a_definitions_file_are_read(tmp_path):
+    pc.RESULTS.clear()
+    ev = _mutant_evidence(tmp_path, "N1 a: KILLED [1 failed]\nN2 b: KILLED [1 failed]\nrestored; 2 of 2 killed\n")
+    pc.check_evidence("3. **Mutants: 2 of 2 killed.**", ev)
+    assert result("body numbers backed by logs")[0] == "PASS"
+
+
+def test_a_cut_short_mutant_log_still_fails(tmp_path):
+    pc.RESULTS.clear()
+    ev = _mutant_evidence(tmp_path, "N1 a: KILLED [1 failed]\nN2 b: KILLED [1 failed]\n")
+    pc.check_evidence("3. **Mutants: 2 of 2 killed.**", ev)
+    status, detail = result("body numbers backed by logs")
+    assert status == "FAIL" and "restored" in detail

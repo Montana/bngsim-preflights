@@ -455,6 +455,11 @@ def check_template(body: str, title: str | None):
         problems.append("no '## Review' section (CONTRIBUTING, since #1746)")
     else:
         forms = [f for f in REVIEW_FORMS if re.search(f, m.group(1))]
+        # The owner's form: a review round reported without the template's label
+        # (no model named): the round, where it ran, and what each finding became.
+        if not forms and re.search(r"round of a whole-branch `?/code-review`?", m.group(1)) \
+                and re.search(r"\b[0-9a-f]{8}\b", m.group(1)):
+            forms = ["reported round"]
         if len(forms) != 1:
             problems.append(f"'## Review' must keep exactly one of the three forms (has {len(forms)})")
         elif "AI model" in forms[0]:
@@ -959,14 +964,14 @@ def check_evidence(body: str, evidence: list[Path]):
     if m:
         last = {}
         for f, t in sorted(logs.items(), key=lambda kv: kv[0].stat().st_mtime):
-            if "mutant" not in f.name:
+            if "mutant" not in f.name or f.suffix == ".json":  # a mutants file, not a log
                 continue
-            for name, verdict in re.findall(r"^(M\d+)[^:\n]*: (KILLED|SURVIVED)", t, re.M):
+            for name, verdict in re.findall(r"^([A-Z]+\d+)[^:\n]*: (KILLED|SURVIVED)", t, re.M):
                 last[name] = verdict
         killed = sum(v == "KILLED" for v in last.values())
         if last and (killed, len(last)) != (int(m.group(1)), int(m.group(2))):
             unbacked.append(f"mutants: body {m.group(1)} of {m.group(2)}, logs {killed} of {len(last)}")
-        if any("restored" not in t for f, t in logs.items() if "mutant" in f.name):
+        if any("restored" not in t for f, t in logs.items() if "mutant" in f.name and f.suffix != ".json"):
             unbacked.append("a mutant log has no 'restored' line (run cut short?)")
     record("FAIL" if unbacked else "PASS", "body numbers backed by logs",
            "; ".join(unbacked) + " (not found in the evidence logs)" if unbacked else f"each **N passed** and the mutant count are in {len(logs)} logs",
