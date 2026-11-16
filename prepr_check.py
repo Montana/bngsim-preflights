@@ -457,7 +457,7 @@ def check_template(body: str, title: str | None):
         forms = [f for f in REVIEW_FORMS if re.search(f, m.group(1))]
         # The owner's form: a review round reported without the template's label
         # (no model named): the round, where it ran, and what each finding became.
-        if not forms and re.search(r"round of a whole-branch `?/code-review`?", m.group(1)) \
+        if not forms and re.search(r"rounds? of a whole-branch `?/code-review`?", m.group(1)) \
                 and re.search(r"\b[0-9a-f]{8}\b", m.group(1)):
             forms = ["reported round"]
         if len(forms) != 1:

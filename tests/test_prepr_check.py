@@ -286,3 +286,13 @@ def test_a_cut_short_mutant_log_still_fails(tmp_path):
     pc.check_evidence("3. **Mutants: 2 of 2 killed.**", ev)
     status, detail = result("body numbers backed by logs")
     assert status == "FAIL" and "restored" in detail
+
+
+def test_several_review_rounds_reported_are_a_form():
+    pc.RESULTS.clear()
+    body = GOOD_BODY.replace(
+        "**Not reviewed.** This PR needs `/code-review` before it merges.",
+        "Two rounds of a whole-branch `/code-review`. The first, on `ae2ffa96`, returned 10.",
+    )
+    pc.check_template(body, "parser: read x as y (#1)")
+    assert result("PR template")[0] == "PASS"
