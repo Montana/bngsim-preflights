@@ -1016,7 +1016,7 @@ def check_evidence(body: str, evidence: list[Path]):
         for f, t in sorted(logs.items(), key=lambda kv: kv[0].stat().st_mtime):
             if "mutant" not in f.name or f.suffix == ".json":  # a mutants file, not a log
                 continue
-            for name, verdict in re.findall(r"^([A-Z]+\d+)[^:\n]*: (KILLED|SURVIVED)", t, re.M):
+            for name, verdict in re.findall(r"^([A-Z]+\d+)\b[^\n]*?: (KILLED|SURVIVED)\b", t, re.M):
                 last[name] = verdict
         killed = sum(v == "KILLED" for v in last.values())
         if last and (killed, len(last)) != (int(m.group(1)), int(m.group(2))):

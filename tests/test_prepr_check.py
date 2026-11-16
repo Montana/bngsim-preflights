@@ -296,3 +296,14 @@ def test_several_review_rounds_reported_are_a_form():
     )
     pc.check_template(body, "parser: read x as y (#1)")
     assert result("PR template")[0] == "PASS"
+
+
+def test_a_mutant_whose_name_holds_a_colon_is_counted(tmp_path):
+    pc.RESULTS.clear()
+    ev = _mutant_evidence(
+        tmp_path,
+        "N1 a cycle: whole block as declared: KILLED [1 failed]\nN2 b: KILLED [1 failed]\n"
+        "restored; 2 of 2 killed\n",
+    )
+    pc.check_evidence("3. **Mutants: 2 of 2 killed.**", ev)
+    assert result("body numbers backed by logs")[0] == "PASS"
