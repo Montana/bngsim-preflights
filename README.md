@@ -206,13 +206,34 @@ python linux_check.py --dry-run                           # print the commands o
 
 Before running anything, it checks that a container actually starts: after an update, Docker Desktop can answer `docker info` and still start nothing. With `--compare-main`, each test file that failed is run again on main in the same image. A test that fails there too fails because of the image (no `.git` in the copy, or the root user), not because of the change. The exit status is 0 only when nothing fails that main passes.
 
+## `kink_check.py`
+
+bngsim evaluates model math in two kinds of place: the engine (ExprTk, in C++) computes the run, and Python readers built on sympy and numpy compute what the run needs beside it, such as a crossing's threshold, a sensitivity seed, or the symbolic rate law the sensitivity RHS is built from. Where a reader defines a function otherwise than the engine, the run is right and the number beside it is wrong, with no error. `kink_check.py` evaluates expressions at their kinks (halves, quarters, zero and their negatives, where rounding and modulo part ways) through the engine and through each reader, and lists every disagreement.
+
+```bash
+python kink_check.py --python ~/work/bngsim-x/.venv/bin/python "rint(p)" "mod(p, 2)" "frac(p)" "p % 2"
+python kink_check.py --points=-2.5,-0.5,0.5 "frac(p)*k"
+```
+
+```
+bngsim 0.17.2: 65 evaluations
+82 disagreement(s) with the engine:
+  expression                     p  reader               engine   reader gives
+  rint(p)                      2.5  seed                    3.0            2.0
+  mod(p, 2)                   -0.5  seed                   -0.5            1.5
+  frac(p)                     -0.5  derived value          -0.5            0.5
+  ...
+```
+
+That is main before #1809: the bugs of #1800, found in one run. On #1809's branch the seed and derived-value readers agree everywhere, and what is left is in the rate-law parse, #1815's. The probe runs with the worktree's interpreter, so the script needs no bngsim of its own. Exit status 1 if any reader disagrees.
+
 ## Install
 
 ```bash
 pipx install git+https://github.com/Montana/bngsim-preflights
 ```
 
-This installs four commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate` and `bngsim-linux`. Each script also runs on its own with `python <script>.py`.
+This installs five commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate`, `bngsim-linux` and `bngsim-kinks`. Each script also runs on its own with `python <script>.py`.
 
 ## Tests
 
