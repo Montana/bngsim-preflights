@@ -1225,7 +1225,7 @@ def check_private_paths(b: Branch, body: str | None):
         for d in tools:
             if f"/{d}/" in ln or ln.strip().startswith(f"{d}/"):
                 found.append(f"{d}/")
-        if own and len(own) > 2 and re.search(rf"[/\\]{re.escape(own)}[/\\]", ln):
+        if own and len(own) > 2 and own not in _PLACEHOLDER_HOMES and re.search(rf"[/\\]{re.escape(own)}[/\\]", ln):
             found.append(f"/{own}/")
         if found:
             hits.append(f"{p}: {sorted(set(found))[0]}")

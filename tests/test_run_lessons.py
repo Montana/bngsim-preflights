@@ -88,6 +88,14 @@ def test_a_merged_pr_is_not_something_to_be_stacked_on(make_branch, monkeypatch)
 # --- check_private_paths --------------------------------------------------------------
 
 
+def _home(monkeypatch, tmp_path, *dirs: str):
+    home = tmp_path / "home" / "grace"
+    for d in dirs:
+        (home / d).mkdir(parents=True)
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+
 def test_a_home_directory_in_an_added_line_fails(make_branch):
     b = make_branch({}, {"third_party/nfsim/VENDOR.json": '{"local_checkout": "/Users/ada/.tool/jobs/1/tmp/nfsim"}\n'})
     pc.check_private_paths(b, None)
@@ -107,13 +115,6 @@ def test_this_machines_own_home_fails_under_any_root(make_branch, monkeypatch):
     b = make_branch({}, {"a.py": 'P = "/volumes/data/grace/checkout"\n'})
     pc.check_private_paths(b, None)
     assert result("no private paths")[0] == "FAIL"
-
-
-def _home(monkeypatch, tmp_path, *dirs: str):
-    home = tmp_path / "home" / "grace"
-    for d in dirs:
-        (home / d).mkdir(parents=True)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
 
 def test_a_tools_working_directory_fails(make_branch, monkeypatch, tmp_path):
@@ -139,7 +140,8 @@ def test_a_home_directory_in_the_body_fails(make_branch):
     assert status == "FAIL" and "the PR body" in detail
 
 
-def test_placeholders_and_lines_already_there_pass(make_branch):
+def test_placeholders_and_lines_already_there_pass(make_branch, monkeypatch, tmp_path):
+    _home(monkeypatch, tmp_path)
     b = make_branch({"old.json": '{"p": "/Users/ada/x"}\n'},
                     {"docs.md": "cache: /home/you/.cache/bngsim\nCI: /home/runner/work\n/tmp/nfsim-vendor-candidate\n",
                      "ci.py": "# a ``.tool`` directory is skipped\n"})
@@ -333,3 +335,11 @@ def test_the_new_checks_are_run_by_main():
     for call in ("check_stacked(b, body)", "check_private_paths(b, body)", "check_vendored(b, python)",
                  "check_wall_clock(b)", "check_tree_underneath(mt.name, mb, base)"):
         assert call in main, call
+
+
+def test_a_ci_runners_own_home_is_a_placeholder(make_branch, monkeypatch):
+    # On a hosted runner this machine's home is /home/runner, which documentation names.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/runner")))
+    b = make_branch({}, {"docs.md": "CI checks out under /home/runner/work\n"})
+    pc.check_private_paths(b, None)
+    assert result("no private paths")[0] == "PASS"
