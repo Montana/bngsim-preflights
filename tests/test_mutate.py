@@ -141,3 +141,165 @@ def test_a_mutants_file_without_a_test_is_refused(project):
     path.write_text(json.dumps({"mutants": [{"file": "calc.py", "find": "a", "replace": "b"}]}))
     with pytest.raises(SystemExit, match="no 'test' command"):
         mutate.main([str(path)])
+
+
+# --- a mutant that tests nothing, and a run that is cut short -------------------------
+
+
+def test_a_mutant_that_replaces_text_with_itself_is_not_applied(project):
+    m = write_mutants(project, [{"name": "M1 same", "file": "calc.py", "find": "a + b", "replace": "a + b"},
+                                {"name": "M2 subtracts", "file": "calc.py", "find": "a + b", "replace": "a - b"}])
+    assert mutate.main([str(m)]) == 1
+    assert "M1 same: NOT APPLIED" in log(project)
+    assert log(project).splitlines()[-1] == "restored; 1 of 2 killed; 1 tested nothing (M1 same)"
+
+
+def test_count_all_replaces_however_many_there_are(project):
+    (project / "calc.py").write_text("def add(a, b):\n    c = a + b\n    return c if c else a + b\n")
+    m = write_mutants(project, [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b", "count": "all"},
+                                {"name": "M2", "file": "calc.py", "find": "a * b", "replace": "a", "count": "all"}])
+    assert mutate.main([str(m)]) == 1
+    assert "M1: KILLED" in log(project) and "M2: NOT APPLIED" in log(project)
+
+
+def test_a_count_that_is_no_count_is_refused(project):
+    m = write_mutants(project, [{"file": "calc.py", "find": "a + b", "replace": "a - b", "count": 0}])
+    with pytest.raises(SystemExit, match="count"):
+        mutate.main([str(m)])
+
+
+def test_env_reaches_the_test(project):
+    (project / "test_calc.py").write_text(
+        "import os\nfrom calc import add\n\n\ndef test_add():\n    if os.environ.get('WHERE') == 'here':\n"
+        "        assert add(2, 3) == 5\n")
+    mutants = [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b"}]
+    # The test looks at add only where WHERE is set: without it the mutant survives.
+    assert mutate.main([str(write_mutants(project, mutants))]) == 1
+    assert mutate.main([str(write_mutants(project, mutants, env={"WHERE": "here"}))]) == 0
+    assert "M1: KILLED" in log(project)
+    mutants[0]["env"] = {"WHERE": "elsewhere"}  # a mutant's own env wins
+    assert mutate.main([str(write_mutants(project, mutants, env={"WHERE": "here"}))]) == 1
+
+
+def test_a_mutant_that_hangs_is_killed_and_the_file_restored(project):
+    m = write_mutants(project, [{"name": "M1 hangs", "file": "calc.py", "find": "    return a + b",
+                                 "replace": "    while True:\n        pass"}])
+    assert mutate.main([str(m), "--timeout", "3"]) == 0
+    assert "M1 hangs: KILLED [timed out after 3 s]" in log(project)
+    assert (project / "calc.py").read_text() == CALC
+
+
+def test_a_build_that_runs_out_of_time_is_a_failed_build(project):
+    m = write_mutants(project, [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b",
+                                 "build": [sys.executable, "-c", "import time; time.sleep(60)"]}])
+    assert mutate.main([str(m), "--timeout", "2"]) == 1
+    assert "M1: BUILD FAILED [timed out after 2 s]" in log(project)
+    assert (project / "calc.py").read_text() == CALC
+
+
+def _git(project: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=project, check=True, capture_output=True, timeout=60)
+
+
+def _repo(project: Path) -> None:
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.invalid")
+    _git(project, "config", "user.name", "test")
+    _git(project, "add", "calc.py", "test_calc.py")
+    _git(project, "commit", "-q", "-m", "base")
+
+
+def test_a_run_will_not_start_on_uncommitted_changes(project):
+    _repo(project)
+    (project / "calc.py").write_text(CALC + "\n# not committed\n")
+    m = write_mutants(project, [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b"}])
+    with pytest.raises(SystemExit, match="uncommitted changes in calc.py"):
+        mutate.main([str(m)])
+    assert not (project / ".mutate-backup").exists()
+    assert mutate.main([str(m), "--allow-dirty"]) == 0
+    _git(project, "commit", "-q", "-am", "now committed")
+    assert mutate.main([str(m)]) == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_run_ended_from_outside_puts_the_file_back_and_says_so(project):
+    import signal
+    import subprocess
+    import time
+
+    (project / "test_calc.py").write_text(
+        "import time\nfrom calc import add\n\n\ndef test_add():\n    time.sleep(120)\n    assert add(2, 3) == 5\n")
+    m = write_mutants(project, [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b"},
+                                {"name": "M2", "file": "calc.py", "find": "a + b", "replace": "a * b"}])
+    proc = subprocess.Popen([sys.executable, str(ROOT / "mutate.py"), str(m)], cwd=project,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 60
+        while "a - b" not in (project / "calc.py").read_text() and time.time() < deadline:
+            time.sleep(0.05)
+        assert "a - b" in (project / "calc.py").read_text()  # the mutant is in the file
+        time.sleep(1.0)  # and its test is running
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=60)
+    finally:
+        proc.kill()
+    assert proc.returncode == 130
+    assert (project / "calc.py").read_text() == CALC
+    assert not (project / ".mutate-backup").exists()
+    assert "INTERRUPTED (SIGTERM) after 0 of 2" in out and "every file put back" in out
+    last = log(project).splitlines()[-1]
+    assert last.startswith("INTERRUPTED") and "restored" not in log(project)
+
+
+def test_a_cache_of_one_mutant_is_not_run_for_the_next_or_left_behind(project):
+    # Mutants the size of the original, and a test that takes a fraction of a
+    # second: each is written, compiled to a .pyc and put back inside one second.
+    # Python accepts a .pyc whose recorded second and size match the source, so
+    # without care the cache of M3 is what M4 is judged on, and what is left.
+    import subprocess
+
+    mutants = [{"name": f"M{i}", "file": "calc.py", "find": "a + b", "replace": r}
+               for i, r in enumerate(("a - b", "a * b", "a % b"), 1)]
+    mutants.append({"name": "M4 the same sum", "file": "calc.py", "find": "a + b", "replace": "b + a"})
+    for _ in range(2):
+        assert mutate.main([str(write_mutants(project, mutants))]) == 1
+        lines = log(project)
+        assert all(f"M{i}: KILLED" in lines for i in (1, 2, 3))
+        assert "M4 the same sum: SURVIVED" in lines  # judged on its own code
+        assert (project / "calc.py").read_text() == CALC
+        after = subprocess.run(PYTEST, cwd=project, capture_output=True, text=True, timeout=120)
+        assert after.returncode == 0, after.stdout[-400:]  # and the original is what runs
+
+
+def test_line_endings_come_back_as_they_were_after_each_mutant(project):
+    crlf = CALC.replace("\n", "\r\n").encode()
+    (project / "calc.py").write_bytes(crlf)
+    # The second mutant's text spans a line ending: it applies only if the first
+    # was put back with the file's own.
+    m = write_mutants(project, [{"name": "M1", "file": "calc.py", "find": "a + b", "replace": "a - b"},
+                                {"name": "M2", "file": "calc.py", "find": "a + b\r\n", "replace": "a * b\r\n"}])
+    assert mutate.main([str(m)]) == 0
+    assert "M1: KILLED" in log(project) and "M2: KILLED" in log(project)
+    assert (project / "calc.py").read_bytes() == crlf
+
+
+def test_restore_puts_a_file_back_in_a_later_second_than_the_mutant(project):
+    # The recovery path, after a run that was killed: the file holds a mutant of
+    # the original's size, written this second. Put back with the backup's old
+    # time, or in the same second, a cache compiled from the mutant would match.
+    import os
+    import time
+
+    backup = project / ".mutate-backup"
+    backup.mkdir()
+    (backup / "calc.py").write_text(CALC)
+    mutate._WRITTEN.clear()
+    (project / "calc.py").write_text(CALC.replace("a + b", "a - b"))
+    mutant_second = int(os.stat(project / "calc.py").st_mtime)
+    old = time.time() - 3600
+    os.utime(backup / "calc.py", (old, old))
+    assert mutate.restore() == [Path("calc.py")]
+    assert (project / "calc.py").read_text() == CALC
+    assert int(os.stat(project / "calc.py").st_mtime) > mutant_second

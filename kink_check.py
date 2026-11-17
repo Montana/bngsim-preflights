@@ -89,6 +89,8 @@ def rate_law(expr, p):
     from bngsim._jacobian import _exprtk_to_sympy
     e = _exprtk_to_sympy(expr)
     e = e[0] if isinstance(e, tuple) else e
+    if e is None:  # the parse declined the expression
+        return None
     subs = {s: (p if str(s) == "p" else 1.0) for s in e.free_symbols}
     return complex(e.subs(subs).evalf()).real if e.subs(subs).is_number else None
 

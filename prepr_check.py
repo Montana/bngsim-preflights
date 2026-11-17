@@ -1084,12 +1084,22 @@ def check_evidence(body: str, evidence: list[Path]):
         for f, t in sorted(logs.items(), key=lambda kv: kv[0].stat().st_mtime):
             if "mutant" not in f.name or f.suffix == ".json":  # a mutants file, not a log
                 continue
-            for name, verdict in re.findall(r"^([A-Z]+\d+)\b[^\n]*?: (KILLED|SURVIVED)\b", t, re.M):
+            for name, verdict in re.findall(
+                    r"^([A-Z]+\d+)\b[^\n]*?: (KILLED|SURVIVED|NOT APPLIED|BUILD FAILED|TEST ERROR)\b", t, re.M):
                 last[name] = verdict
         killed = sum(v == "KILLED" for v in last.values())
         if last and (killed, len(last)) != (int(m.group(1)), int(m.group(2))):
             unbacked.append(f"mutants: body {m.group(1)} of {m.group(2)}, logs {killed} of {len(last)}")
-        if any("restored" not in t for f, t in logs.items() if "mutant" in f.name and f.suffix != ".json"):
+        # A mutant that was not applied, or whose build or test did not run, tested
+        # nothing: it is neither killed nor a survivor, and the count is not one.
+        untested = sorted(n for n, v in last.items() if v in ("NOT APPLIED", "BUILD FAILED", "TEST ERROR"))
+        if untested:
+            unbacked.append(f"mutants that tested nothing ({', '.join(f'{n}: {last[n]}' for n in untested)}): "
+                            "fix the mutants file and rerun")
+        mutant_logs = [t for f, t in logs.items() if "mutant" in f.name and f.suffix != ".json"]
+        if any(re.search(r"^INTERRUPTED\b", t, re.M) for t in mutant_logs):
+            unbacked.append("a mutant run was interrupted: check the tree is clean (git status) and rerun it")
+        elif any("restored" not in t for t in mutant_logs):
             unbacked.append("a mutant log has no 'restored' line (run cut short?)")
     record("FAIL" if unbacked else "PASS", "body numbers backed by logs",
            "; ".join(unbacked) + " (not found in the evidence logs)" if unbacked else f"each **N passed** and the mutant count are in {len(logs)} logs",
@@ -1141,6 +1151,175 @@ def check_against_main(b: Branch, main_python: str, main_tree: Path):
     record("FAIL" if bad else "PASS", "new tests fail on main (main build)",
            "; ".join(rows) + (f" — nothing fails on main in {', '.join(bad)}" if bad else ""),
            "revert the fix and watch each test fail")
+
+
+# ─── 2026-11-17: lessons from #1815, #1821 and the NFsim patches ─────────────
+
+
+def check_stacked(b: Branch, body: str | None):
+    """A branch that holds another open PR's commits is stacked on it. Comparing with
+    main then credits this change with what that PR fixed (#1815 on #1809)."""
+    r = sh(["gh", "pr", "list", "-R", "lanl/bngsim", "--state", "open", "--limit", "200", "--json",
+            "number,headRefOid,headRefName"], b.repo, timeout=120)
+    if r.returncode:
+        record("SKIP", "stacked on another open PR", "gh unavailable")
+        return
+    mine = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], b.repo).stdout.strip()
+    head = sh(["git", "rev-parse", "HEAD"], b.repo).stdout.strip()
+    main = sh(["git", "rev-parse", "origin/main"], b.repo).stdout.strip() or b.merge_base
+
+    def within(a, c):  # a is an ancestor of c; False where a is not in this clone
+        return sh(["git", "merge-base", "--is-ancestor", a, c], b.repo).returncode == 0
+
+    under = []
+    for pr in json.loads(r.stdout):
+        oid = pr["headRefOid"]
+        if pr["headRefName"] == mine or oid == head:
+            continue
+        if within(oid, head) and not within(oid, main):
+            under.append((pr["number"], oid))
+    STATE["stacked_on"] = under
+    if not under:
+        record("PASS", "stacked on another open PR", "the branch holds no other open PR's commits")
+        return
+    names = ", ".join(f"#{n} ({oid[:8]})" for n, oid in under)
+    unnamed = [f"#{n}" for n, _ in under if body is not None and f"#{n}" not in body]
+    based = any(within(oid, b.merge_base) for _, oid in under)
+    detail = f"holds the commits of {names}"
+    if unnamed:
+        detail += f"; the body does not name {', '.join(unnamed)} (say it is stacked, and the merge order)"
+    if not based:
+        detail += f"; the diff read here is against main and includes theirs: pass --base {under[-1][1][:8]}"
+    record("FAIL" if unnamed else "WARN", "stacked on another open PR", detail,
+           "what the PR underneath fixed is not this PR's to claim: compare with its head, not main")
+
+
+_HOME = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\\\?Users\\\\?)([A-Za-z0-9._-]+)")
+_PLACEHOLDER_HOMES = frozenset({"you", "user", "username", "me", "name", "runner", "runneradmin", "shared", "..."})
+
+
+_SHARED_DOT_DIRS = frozenset({".cache", ".config", ".local", ".venv", ".git", ".github", ".ssh", ".pyenv",
+                              ".cargo", ".npm", ".conda", ".docker", ".Trash"})
+
+
+def _tool_dirs() -> list[str]:
+    """The hidden directories in this machine's home that are some tool's own: where
+    an agent, an editor or a job runner keeps its working files. The ones every
+    machine has, and documentation names, are left out."""
+    try:
+        names = [d.name for d in Path.home().iterdir() if d.name.startswith(".") and d.is_dir()]
+    except OSError:
+        return []
+    return sorted(n for n in names if n not in _SHARED_DOT_DIRS and not n.endswith("_cache") and len(n) > 2)
+
+
+def check_private_paths(b: Branch, body: str | None):
+    """An added line, or the body, that holds a home directory or a tool's working
+    directory: a vendoring script wrote its checkout's path into VENDOR.json (#1821)."""
+    own = Path.home().name
+    tools = _tool_dirs()
+    hits = []
+    rows = list(b.added) + ([("the PR body", ln) for ln in body.splitlines()] if body else [])
+    for p, ln in rows:
+        found = [m.group(0) for m in _HOME.finditer(ln) if m.group(1) not in _PLACEHOLDER_HOMES]
+        for d in tools:
+            if f"/{d}/" in ln or ln.strip().startswith(f"{d}/"):
+                found.append(f"{d}/")
+        if own and len(own) > 2 and re.search(rf"[/\\]{re.escape(own)}[/\\]", ln):
+            found.append(f"/{own}/")
+        if found:
+            hits.append(f"{p}: {sorted(set(found))[0]}")
+    hits = list(dict.fromkeys(hits))
+    record("FAIL" if hits else "PASS", "no private paths in the diff",
+           "; ".join(hits[:6]) + (f" (+{len(hits) - 6} more)" if len(hits) > 6 else "") if hits
+           else "no home or tool directory in an added line or the body",
+           "a path on this machine names its user to everyone who reads the repository")
+
+
+_VENDOR = ("third_party/nfsim/", "scripts/nfsim_vendor_patches/", "scripts/vendor_nfsim.py")
+_VENDOR_CHECKOUTS = ("/tmp/nfsim-vendor-candidate", "/private/tmp/nfsim-vendor-candidate")
+
+
+def check_vendored(b: Branch, python: str):
+    """A change under the vendored NFsim tree is made through the carry queue, and the
+    tripwire shows the tree is what the queue produces: it caught a mutant an
+    interrupted run left in third_party/nfsim (#1821)."""
+    if not any(f.startswith(_VENDOR) for f in b.files):
+        record("SKIP", "vendored NFsim tree is the carry queue's", "no vendored file changed")
+        return
+    probs = []
+    meta = b.repo / "third_party/nfsim/VENDOR.json"
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text())
+        except ValueError:
+            data = None
+            probs.append("VENDOR.json is not JSON")
+        if data:
+            where = str((data.get("source") or {}).get("local_checkout", ""))
+            if where and where not in _VENDOR_CHECKOUTS:
+                probs.append(f"VENDOR.json records the checkout {where!r}: vendor from /tmp/nfsim-vendor-candidate")
+            queued = sum(len(e.get("commits") or [None]) for e in data.get("carry_queue", []))
+            patches = len(list((b.repo / "scripts/nfsim_vendor_patches").glob("*.patch")))
+            if patches and queued != patches:
+                probs.append(f"{patches} patch files, {queued} commits in VENDOR.json's carry queue")
+    script = b.repo / "scripts/vendor_nfsim.py"
+    ran = "the tripwire was not run (no scripts/vendor_nfsim.py)"
+    if script.is_file():
+        exe = python if Path(python).exists() else sys.executable
+        if not any(Path(c).is_dir() for c in _VENDOR_CHECKOUTS):
+            ran = "the tripwire was NOT run: no candidate checkout at /tmp/nfsim-vendor-candidate (rebuild it)"
+            probs.append(ran)
+        else:
+            try:
+                r = sh([exe, "scripts/vendor_nfsim.py", "--verify-clean", "--strict"], b.repo, timeout=1800)
+                tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+                ran = f"vendor_nfsim.py --verify-clean --strict: exit {r.returncode}"
+                if r.returncode:
+                    probs.append(f"{ran} ({tail[0][:160]})")
+            except subprocess.TimeoutExpired:
+                probs.append("vendor_nfsim.py --verify-clean --strict did not finish in 30 minutes")
+    record("FAIL" if probs else "PASS", "vendored NFsim tree is the carry queue's",
+           "; ".join(probs) if probs else ran,
+           "an edit in third_party/nfsim that is not a patch in the queue is lost at the next vendoring")
+
+
+_CLOCK = re.compile(r"\b(perf_counter|monotonic|process_time|time\.time|timeit)\b")
+_TIMED_NAME = r"(?:elapsed|duration|took|wall\w*|runtime|seconds|secs|dt|t_?(?:run|total)|\w*_(?:time|s|sec|secs|seconds|ms))"
+_TIMED = re.compile(
+    rf"\bassert\b[^#]*?(?:\b{_TIMED_NAME}\b|{_CLOCK.pattern}\(\)\s*-\s*\w+)[^#<>]*<=?\s*[\d.]+(?:e-?\d+)?\b")
+
+
+def check_wall_clock(b: Branch):
+    """A new test that bounds a measured time fails on a busy runner, and passes again
+    on a rerun: two red legs in one week were such tests, not bugs (#1819, #1815)."""
+    hits = []
+    for p in sorted({p for p, _ in b.added_in(prefix=("python/tests/",), suffix=(".py",))}):
+        f = b.repo / p
+        if not f.is_file() or not _CLOCK.search(f.read_text(errors="replace")):
+            continue
+        for q, ln in b.added_in(prefix=(p,)):
+            if q == p and _TIMED.search(ln):
+                hits.append(f"{Path(p).name}: {ln.strip()[:70]}")
+    hits = list(dict.fromkeys(hits))
+    record("WARN" if hits else "PASS", "no wall-clock bound in a new test",
+           "; ".join(hits[:4]) if hits else "no added assertion bounds a measured time",
+           "bound the work (steps, evaluations, a ratio taken in one process), not the seconds")
+
+
+def check_tree_underneath(name: str, at: str, main: str):
+    """The build the new tests are run on to see them fail: main, or, for a stacked
+    branch, the head of the PR underneath. On main a test of a stacked branch can
+    fail for what that PR fixes, and the failure is then credited to this one."""
+    under = STATE.get("stacked_on") or []
+    if under and at not in {oid for _, oid in under}:
+        n, oid = under[-1]
+        record("FAIL", "new tests fail before this change",
+               f"the branch is stacked on #{n}, and {name} is at {at[:8]}: a test that fails there may be "
+               f"failing for what #{n} fixes. Pass --main-tree a build of {oid[:8]}",
+               "compare with the head underneath, not main (#1815 on #1809)")
+    elif not under and at != main:
+        record("WARN", "main build is current main", f"{name} is at {at[:8]}, main at {main[:8]}: rebuild it", "")
 
 
 # ─── third pass ─────────────────────────────────────────────────────────────
@@ -1381,6 +1560,8 @@ def main():
     check_clang_format_tests(b)
     if not a.no_gh:
         check_inflight(b)
+        check_stacked(b, body)
+    check_private_paths(b, body)
     check_ci_legs(b)
     if a.count:
         check_counts(b, python)
@@ -1404,6 +1585,8 @@ def main():
     check_binding_order(b)
     check_percent_parse(b)
     check_writer_corpus(b, a.evidence)
+    check_wall_clock(b)
+    check_vendored(b, python)
     if body:
         check_review_covers_head(b, body)
     check_clean_tree(b)
@@ -1411,8 +1594,7 @@ def main():
         mt = a.main_tree.resolve()
         mb = sh(["git", "rev-parse", "HEAD"], mt).stdout.strip()
         base = sh(["git", "rev-parse", b.base_ref], repo).stdout.strip()
-        if mb != base:
-            record("WARN", "main build is current main", f"{mt.name} is at {mb[:8]}, main at {base[:8]}: rebuild it", "")
+        check_tree_underneath(mt.name, mb, base)
         check_against_main(b, str(mt / ".venv/bin/python"), mt)
     if (Path(python).exists()):
         check_build(b, python)

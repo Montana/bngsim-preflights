@@ -8,7 +8,7 @@ bngsim's maintainers re-run every claim a pull request makes. When they find a p
 
 | Script | What it does |
 |---|---|
-| [`prepr_check.py`](prepr_check.py) | The pre-PR gate: 33 checks of a branch, its tests, its evidence and its pull-request description. |
+| [`prepr_check.py`](prepr_check.py) | The pre-PR gate: 37 checks of a branch, its tests, its evidence and its pull-request description. |
 | [`floor_for_branch.py`](floor_for_branch.py) | Reports which path-filtered CI workflows run a branch's new test files, and works out the old `PYTEST_COLLECTED_FLOOR` line. The sketch behind [#1757](https://github.com/lanl/bngsim/issues/1757). |
 
 Both are single files, standard library only. Run them from the root of a bngsim worktree.
@@ -127,6 +127,18 @@ A code review of every open pull request at once gave 161 candidate findings, an
 
 Run against two of those pull requests as first pushed, the Python 3.10 check fails #1775 for `locale.getencoding`, as the review found. The readers check warns on #1763 but not about the right functions: its regressions came from readers of a function whose *answer* changed while its code did not, which no text search can see.
 
+### From a week of fixes: #1815, #1821 and two NFsim patches
+
+Each of these happened, and was caught by eye or by luck.
+
+| Check | It catches | From |
+|---|---|---|
+| Stacked on another open PR | A branch that holds another open pull request's commits. The description must name it, the diff should be read against it (`--base`), and `--main-tree` must be a build of *its* head: on main, a test can fail for what the pull request underneath fixes, and the fix is then credited to the wrong change | #1815 on #1809: a switch-time fix claimed for #1815 was #1809's |
+| No private paths | A home directory (`/Users/<name>/`, `/home/<name>/`, `C:\Users\<name>\`, or this machine's own home under any root) or a tool's working directory, in an added line or in the description. Placeholders such as `/home/you/` and `/home/runner/` pass | #1821: the vendoring script recorded the path of its checkout in `VENDOR.json` |
+| Vendored NFsim tree is the carry queue's | When `third_party/nfsim`, the patch series or the vendoring script changes: runs `scripts/vendor_nfsim.py --verify-clean --strict`, compares the patch files with the queue in `VENDOR.json`, and refuses a recorded checkout other than the agreed one. A tripwire that could not run is a failure, not a pass | #1821: the tripwire found a mutant an interrupted run had left in the vendored tree |
+| No wall-clock bound in a new test | An added `assert elapsed < 2.0`, or any bound on a measured time, in a test file that reads a clock. It fails on a busy runner and passes on a rerun | Two red CI legs in one week that were timing tests, not bugs |
+| A mutant that tested nothing | A `NOT APPLIED`, `BUILD FAILED` or `TEST ERROR` line in a mutant log, or a run that ends `INTERRUPTED`: the count in the description is then not a count | Three mutants file entries gone stale in one week, each reading as a result until the log was opened |
+
 ## What it cannot judge
 
 A clean run is not a review. The gate ends with a `MANUAL` list of what no script can decide, each to be answered in the description:
@@ -144,7 +156,8 @@ And some checks are heuristics. "Linux run covers the touched tests" matches fun
 | `--issue N` | The issue the branch fixes |
 | `--body FILE` / `--title TEXT` | The drafted pull-request description and title |
 | `--evidence DIR` | A directory of this change's logs: mutants, Docker, suite, timing. Repeatable. The worktree's own `*.log` files are always read |
-| `--main-tree DIR` | A built checkout of main; its `.venv` runs the new tests |
+| `--main-tree DIR` | A built checkout of main, or, for a stacked branch, of the head of the pull request underneath; its `.venv` runs the new tests |
+| `--base REF` | What the branch's diff is read against (default `origin/main`); for a stacked branch, the head underneath |
 | `--main-pkg DIR --boot DIR` | The older route: main's package directory, and the directory with the `sitecustomize` that points pytest's workers at it (or set `$BNGSIM_AB_BOOT`) |
 | `--full`, `--docs-python PY` | Also run pre-commit on all files, and `sphinx -W` with that interpreter |
 | `--pr N`, `--thread-read` | The open pull request this branch updates, and that its new comments have been read |
@@ -169,6 +182,7 @@ A test that passes on the fix should fail on every way of getting it wrong. `mut
 python mutate.py mutants.json            # every mutant; one line each in mutants.log
 python mutate.py mutants.json --only M3  # just one
 python mutate.py --restore               # undo a run that was killed outright
+python mutate.py mutants.json --timeout 300   # seconds for each build and each test
 ```
 
 A mutants file names the test command, an optional build, and each mutant as a `find` and `replace` in one file:
@@ -180,20 +194,33 @@ A mutants file names the test command, an optional build, and each mutant as a `
     {"name": "M1 the guard never applied", "file": "python/bngsim/x.py",
      "find": "if h < 1:", "replace": "if False:"},
     {"name": "M2 the C++ check dropped", "file": "src/x.cpp", "find": "check(x);", "replace": "",
-     "build": ["python", "scripts/rebuild_editable.py"]}
+     "build": ["python", "scripts/rebuild_editable.py"]},
+    {"name": "M3 every call site", "file": "src/x.cpp", "find": "hold(r)", "replace": "(void)r", "count": "all",
+     "build": ["python", "scripts/rebuild_editable.py"], "env": {"BNGPATH": "/abs/path/to/bng"}}
   ]
 }
 ```
+
+`count` is how many times `find` must occur (default 1), or `"all"` for however many there are. A mutant's own `build`, `test` and `env` override the file's, so one file can hold Python mutants and C++ mutants that need a rebuild.
 
 Each verdict is one of these:
 
 - `KILLED`: a test failed.
 - `SURVIVED`: no test catches that mistake.
-- `NOT APPLIED`: `find` does not occur exactly `count` times, usually because the file moved on.
-- `BUILD FAILED`: the build step failed.
+- `NOT APPLIED`: `find` does not occur exactly `count` times, usually because the file moved on; or `replace` is `find`.
+- `BUILD FAILED`: the build step failed, or ran out of time.
 - `TEST ERROR`: pytest did not run the tests.
 
-Files are copied to `.mutate-backup/` before the first edit and put back after every mutant. When the run ends, it checks that every file is byte-for-byte what it was at the start.
+The last three tested nothing. They fail the run, the log's last line names them, and the gate refuses a description that counts them.
+
+A mutant is a deliberate bug, so the run is built not to leave one behind:
+
+- **It will not start on uncommitted changes** to a file it would edit (`--allow-dirty` overrides). With the work committed, `git diff` shows a leftover and `git checkout` removes it.
+- **Every file is put back after its mutant, and on the way out whatever ends the run:** an exception, Ctrl-C, or a terminal or calling tool stopping it (SIGTERM, SIGHUP). An interrupted run's log ends with `INTERRUPTED`, not with a count.
+- **Files are copied to `.mutate-backup/` before the first edit,** so a run killed outright can be undone with `--restore`, and the next run refuses to start until it is.
+- **Each build and test has a time limit** (`--timeout`, default 1800 s). A test that runs out is counted as killed, since a hang is a failure a test would show; the whole process group is ended, so a test runner's workers do not go on reading the mutated file.
+- **A cached `.pyc` of a mutant cannot pass for the original.** Python trusts a cache whose recorded source time, in whole seconds, and size match the source. A mutant the size of the original (`a - b` for `a + b`), compiled by a quick test and put back within the second, leaves exactly that: the source is right and Python goes on running the mutant. Each write therefore lands in a later second than the last, which also keeps a build tool's timestamps in order.
+- **At the end it checks that every file is byte-for-byte what it was at the start.**
 
 ## `linux_check.py`
 
@@ -229,13 +256,36 @@ bngsim 0.17.2: 65 evaluations
 
 That is main before #1809: the bugs of #1800, found in one run. On #1809's branch the seed and derived-value readers agree everywhere, and what is left is in the rate-law parse, #1815's. The probe runs with the worktree's interpreter, so the script needs no bngsim of its own. Exit status 1 if any reader disagrees.
 
+## `const_check.py`
+
+`kink_check.py` evaluates the expressions you give it. `const_check.py` writes them: constant expressions, which a parser folds whole before anything else reads them, and that fold is where a reader parts from the engine. It builds them from operands that sit where the definitions differ (halves, negatives, `0.1`, a whole number with and without a point, a 17-digit literal, a whole number past 2^53, and constants that are no literal such as `_pi` and `sqrt(2)`) and runs them through the same four evaluations.
+
+```bash
+python const_check.py --python ~/work/bngsim-x/.venv/bin/python     # 600 expressions, seed 1
+python const_check.py --functions % frac --count 2000 --seed 7
+python const_check.py --list --count 20                              # just print the expressions
+```
+
+```
+bngsim 0.17.2: 600 constant expressions over %, mod, frac, rint, round, floor, ceil, trunc
+161 expression(s) folded to another number by a reader (347 disagreements):
+     83  derived value  %
+     83  rate law       %
+     75  seed           %
+     57  seed           mod
+     13  derived value  frac
+  ...
+```
+
+That is main. With #1809 and #1815 it is 2 expressions, both a product of two 17-digit literals under `%`, where sympy multiplies at more than a double's precision before the fold. The same seed writes the same expressions, so a count can be compared before and after a fix. A reader that declines or raises is listed and is not a disagreement. Exit status 1 if any reader gives a number the engine does not.
+
 ## Install
 
 ```bash
 pipx install git+https://github.com/Montana/bngsim-preflights
 ```
 
-This installs five commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate`, `bngsim-linux` and `bngsim-kinks`. Each script also runs on its own with `python <script>.py`.
+This installs six commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate`, `bngsim-linux`, `bngsim-kinks` and `bngsim-consts`. Each script also runs on its own with `python <script>.py`.
 
 ## Tests
 
@@ -244,7 +294,7 @@ python -m pip install ".[test]"
 python -m ruff check . && python -m pytest -q
 ```
 
-The tests build small git repositories and projects in temporary directories. Docker is not needed. CI runs them on Linux and macOS, with Python 3.10 and 3.13. The tests were themselves checked with `mutate.py`: 18 mutants of the four scripts, all killed.
+The tests build small git repositories and projects in temporary directories. Docker is not needed. CI runs them on Linux and macOS, with Python 3.10 and 3.13. The tests were themselves checked with `mutate.py`: 18 mutants of the four scripts, and 41 of the checks and safeguards added since, all killed.
 
 ## Requirements
 

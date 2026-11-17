@@ -21,20 +21,39 @@ A mutants file is JSON:
     }
 
 Each mutant replaces `find` with `replace` in `file`; `find` must occur exactly
-once (or exactly `count` times, every one replaced). A mutant's own `build` and
-`test` override the file's. After the edit the build runs, if there is one, and
-then the test. A test that fails kills the mutant; one that passes means no test
-catches that way of being wrong.
+once, or exactly `count` times, every one replaced (`"count": "all"` takes
+however many there are, at least one). A mutant's own `build` and `test`
+override the file's. An `"env"` object, in the file or in a mutant, is added to
+the environment of the build and the test. After the edit the build runs, if
+there is one, and then the test. A test that fails kills the mutant; one that
+passes means no test catches that way of being wrong.
 
-Every file is restored after its mutant, and on the way out whatever happens,
-an exception or Ctrl-C included. Before the first edit, each file is copied to
-`.mutate-backup/`, so even a run killed outright can be undone with
-`--restore`. Where a mutant needed a build, the original is built again at the
-end. The run checks that every file is byte-identical to how it started.
+A mutant that cannot be applied tested nothing, and is a failure of the run,
+not a result: its `find` is not in the file (the code moved on since the
+mutants file was written), or it replaces the text with itself.
+
+The run will not start on files with uncommitted changes (`--allow-dirty` lets
+it): with the work committed, `git diff` shows a mutant left behind, and
+`git checkout` removes it. Each write of a file, a mutant or the original put back,
+is in a later second than the one before, so a cached `.pyc` or a built object of
+a mutant never passes for the original's. Every file is restored after its mutant, and on the
+way out whatever happens: an exception, Ctrl-C, or the terminal or a calling
+tool ending the run (SIGTERM, SIGHUP). Before the first edit, each file is
+copied to `.mutate-backup/`, so even a run killed outright (SIGKILL, a power
+cut) can be undone with `--restore`. Where a mutant needed a build, the
+original is built again at the end. The run checks that every file is
+byte-identical to how it started.
+
+Each build and each test has `--timeout` seconds. A test that runs out is
+counted as killed, a mutant that hangs being one a test would catch; a build
+that runs out is a failed build. The whole process group is ended, so a test
+runner's workers do not outlive it.
 
 The log (`mutants.log` by default) has one line per mutant, `NAME: KILLED [...]`
-or `NAME: SURVIVED [...]`, with the tests that failed. Exit status 1 if any
-mutant survived, could not be applied, or its build failed.
+or `NAME: SURVIVED [...]`, with the tests that failed, and ends with a
+`restored; N of M killed` line. A run that was cut short ends with
+`INTERRUPTED` instead, and its count is not one. Exit status 1 if any mutant
+survived, could not be applied, or its build failed.
 """
 
 from __future__ import annotations
@@ -42,10 +61,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,9 +80,10 @@ class Mutant:
     file: Path
     find: str
     replace: str
-    count: int = 1
+    count: int | None = 1  # None: every occurrence, however many
     build: list[str] | None = None
     test: list[str] | None = None
+    env: dict[str, str] | None = None
 
 
 @dataclass
@@ -75,9 +98,22 @@ class Outcome:
         return head + "".join(f"\n    {f}" for f in self.failed[:5])
 
 
+def _count(value, where: str) -> int | None:
+    if value == "all":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 1:
+        raise SystemExit(f"{where}: 'count' is a whole number from 1, or \"all\", not {value!r}")
+    return n
+
+
 def load(path: Path) -> tuple[list[Mutant], list[str] | None, list[str]]:
     """(mutants, the default build, the default test) from a mutants file."""
     data = json.loads(path.read_text(encoding="utf-8"))
+    env = data.get("env") or {}
     test = data.get("test")
     if not test:
         raise SystemExit(f"{path}: no 'test' command")
@@ -92,9 +128,10 @@ def load(path: Path) -> tuple[list[Mutant], list[str] | None, list[str]]:
                 file=Path(m["file"]),
                 find=m["find"],
                 replace=m["replace"],
-                count=int(m.get("count", 1)),
+                count=_count(m.get("count", 1), f"{path}: mutant {i}"),
                 build=m.get("build"),
                 test=m.get("test"),
+                env={**env, **(m.get("env") or {})} or None,
             )
         )
     if not mutants:
@@ -114,10 +151,55 @@ def check_applicable(mutants: list[Mutant]) -> list[Outcome]:
         if not m.file.is_file():
             out.append(Outcome(m.name, "NOT APPLIED", f"{m.file} does not exist"))
             continue
-        n = m.file.read_text(encoding="utf-8").count(m.find)
-        if n != m.count:
+        if m.find == m.replace:
+            out.append(Outcome(m.name, "NOT APPLIED", "`replace` is `find`: it changes nothing"))
+            continue
+        # Read as the mutation reads it: bytes, line endings as they are.
+        n = m.file.read_bytes().decode("utf-8").count(m.find) if m.find else 0
+        if m.count is None and n == 0:
+            out.append(Outcome(m.name, "NOT APPLIED", f"`find` does not occur in {m.file}"))
+        elif m.count is not None and n != m.count:
             out.append(Outcome(m.name, "NOT APPLIED", f"`find` occurs {n} times in {m.file}, not {m.count}"))
     return out
+
+
+def uncommitted(files: list[Path]) -> list[str]:
+    """The files git shows as changed or untracked; none where this is no git checkout."""
+    if not files:
+        return []
+    r = subprocess.run(["git", "status", "--porcelain", "--", *map(str, files)], capture_output=True, text=True)
+    if r.returncode:  # not a repository, or no git
+        return []
+    return [ln[3:] for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def run(cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* in a process group of its own, and end the whole group when the
+    time is up or this process is stopped: a pytest left running its workers
+    would go on reading the mutated file."""
+    posix = os.name == "posix"
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env={**os.environ, **env} if env else None, start_new_session=posix)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        if posix:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+class Stopped(BaseException):
+    """SIGTERM or SIGHUP: the run is being ended from outside."""
+
+
+def _stop(signum, frame):
+    raise Stopped(signal.Signals(signum).name)
 
 
 def failed_tests(output: str) -> tuple[str, ...]:
@@ -131,14 +213,17 @@ def summary_line(output: str) -> str:
 
 
 def run_one(m: Mutant, build: list[str] | None, test: list[str], timeout: float) -> Outcome:
-    original = m.file.read_text(encoding="utf-8")
-    m.file.write_text(original.replace(m.find, m.replace), encoding="utf-8")
+    original = m.file.read_bytes()  # bytes, so the line endings come back as they were
+    put(m.file, original.decode("utf-8").replace(m.find, m.replace).encode("utf-8"))  # every occurrence
     try:
         if build:
-            b = subprocess.run(build, capture_output=True, text=True, timeout=timeout)
+            try:
+                b = run(build, timeout, m.env)
+            except subprocess.TimeoutExpired:
+                return Outcome(m.name, "BUILD FAILED", f"timed out after {timeout:g} s")
             if b.returncode:
                 return Outcome(m.name, "BUILD FAILED", (b.stderr or b.stdout).strip()[-300:])
-        t = subprocess.run(test, capture_output=True, text=True, timeout=timeout)
+        t = run(test, timeout, m.env)
         output = t.stdout + t.stderr
         if t.returncode == 0:
             return Outcome(m.name, "SURVIVED", summary_line(output))
@@ -150,7 +235,33 @@ def run_one(m: Mutant, build: list[str] | None, test: list[str], timeout: float)
     except subprocess.TimeoutExpired:
         return Outcome(m.name, "KILLED", f"timed out after {timeout:g} s")
     finally:
-        m.file.write_text(original, encoding="utf-8")
+        put(m.file, original)
+
+
+_WRITTEN: dict[Path, int] = {}  # the whole second of each file's last write here
+
+
+def put(path: Path, data: bytes) -> None:
+    """Write *path* in a later whole second than it was last written in.
+
+    Python trusts a cached ``.pyc`` whose recorded source time, in whole seconds,
+    and size match the source file. A mutant the same size as the original
+    (``a + b`` for ``a - b``), written, compiled by a quick test and put back
+    inside one second, leaves a cache of the mutant that matches the restored
+    file: the source is right and Python goes on running the mutant, for the next
+    mutant's test and for everyone after the run. A build tool that compares
+    times needs the same: the restored source newer than what was built from the
+    mutant. So each write waits for the next second where it has to; a test that
+    takes longer than a second costs nothing."""
+    last = _WRITTEN.get(path)
+    if last is None and path.exists():
+        last = int(path.stat().st_mtime)  # the original's own second
+    if last is not None:
+        wait = last + 1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+    path.write_bytes(data)
+    _WRITTEN[path] = int(path.stat().st_mtime)
 
 
 def back_up(files: list[Path]) -> None:
@@ -171,7 +282,7 @@ def restore() -> list[Path]:
     for src in sorted(p for p in BACKUP.rglob("*") if p.is_file()):
         dest = src.relative_to(BACKUP)
         if not dest.exists() or dest.read_bytes() != src.read_bytes():
-            shutil.copy2(src, dest)
+            put(dest, src.read_bytes())  # a new time: a cache of the mutant must not match
             changed.append(dest)
     return changed
 
@@ -183,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log", type=Path, default=Path("mutants.log"))
     ap.add_argument("--timeout", type=float, default=1800, help="seconds for each build and test")
     ap.add_argument("--restore", action="store_true", help="restore files from .mutate-backup/ and exit")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help="run even though a file to mutate has uncommitted changes")
     a = ap.parse_args(argv)
 
     if a.restore:
@@ -205,9 +318,23 @@ def main(argv: list[str] | None = None) -> int:
     skip = {o.name for o in outcomes}
     files = sorted({m.file for m in mutants if m.file.is_file()})
     before = {f: digest(f) for f in files}
+    dirty = uncommitted(files)
+    if dirty and not a.allow_dirty:
+        raise SystemExit(
+            "uncommitted changes in " + ", ".join(dirty) + ": commit first, so that a mutant left "
+            "behind shows in `git diff` and `git checkout` removes it (or pass --allow-dirty)"
+        )
 
     back_up(files)
     built = False
+    stopped = None
+    handlers = {}
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is not None:
+            try:
+                handlers[sig] = signal.signal(sig, _stop)
+            except ValueError:  # not the main thread
+                pass
     try:
         with a.log.open("w", encoding="utf-8") as log:
             for o in outcomes:
@@ -222,22 +349,42 @@ def main(argv: list[str] | None = None) -> int:
                 log.write(o.line() + "\n")
                 log.flush()
                 print(o.line(), flush=True)
+    except (KeyboardInterrupt, Stopped) as e:
+        stopped = str(e) or type(e).__name__
     finally:
+        for sig in handlers:  # nothing may stop the restore itself
+            signal.signal(sig, signal.SIG_IGN)
         restore()
         shutil.rmtree(BACKUP, ignore_errors=True)
+        for sig, old in handlers.items():
+            signal.signal(sig, old)
+    if stopped:
+        moved = [str(f) for f in files if digest(f) != before[f]]
+        ran = len(outcomes)
+        with a.log.open("a", encoding="utf-8") as log:
+            log.write(f"INTERRUPTED ({stopped}) after {ran} of {len(mutants)}: not a result\n")
+        print(f"\nINTERRUPTED ({stopped}) after {ran} of {len(mutants)} mutants; "
+              + ("NOT PUT BACK: " + ", ".join(moved) if moved else "every file put back, byte for byte")
+              + ("; the last build was of a mutant, rebuild the original" if built else ""))
+        return 130
     if built:  # the last build was of a mutant: build the original again
         rebuild = next(m.build for m in mutants if m.build) if not build else build
-        r = subprocess.run(rebuild, capture_output=True, text=True, timeout=a.timeout)
-        print(f"original rebuilt: {'ok' if r.returncode == 0 else 'FAILED, rebuild by hand'}")
+        try:
+            ok = run(rebuild, a.timeout, next((m.env for m in mutants if m.env), None)).returncode == 0
+        except subprocess.TimeoutExpired:
+            ok = False
+        print(f"original rebuilt: {'ok' if ok else 'FAILED, rebuild by hand'}")
     moved = [str(f) for f in files if digest(f) != before[f]]
     if moved:
         print("NOT RESTORED: " + ", ".join(moved))
         return 1
 
     killed = sum(o.verdict == "KILLED" for o in outcomes)
-    print(f"\n{killed} of {len(outcomes)} killed; files restored, byte for byte")
+    untested = [o.name for o in outcomes if o.verdict in ("NOT APPLIED", "BUILD FAILED", "TEST ERROR")]
+    extra = f"; {len(untested)} tested nothing ({', '.join(untested)})" if untested else ""
+    print(f"\n{killed} of {len(outcomes)} killed{extra}; files restored, byte for byte")
     with a.log.open("a", encoding="utf-8") as log:
-        log.write(f"restored; {killed} of {len(outcomes)} killed\n")
+        log.write(f"restored; {killed} of {len(outcomes)} killed{extra}\n")
     return 0 if killed == len(outcomes) else 1
 
 
