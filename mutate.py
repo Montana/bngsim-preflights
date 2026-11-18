@@ -23,7 +23,9 @@ A mutants file is JSON:
 Each mutant replaces `find` with `replace` in `file`; `find` must occur exactly
 once, or exactly `count` times, every one replaced (`"count": "all"` takes
 however many there are, at least one). A mutant's own `build` and `test`
-override the file's. An `"env"` object, in the file or in a mutant, is added to
+override the file's. Where a mutant with no build follows one with a build, the
+original is built again first, so its test does not run what the last mutant
+built. An `"env"` object, in the file or in a mutant, is added to
 the environment of the build and the test. After the edit the build runs, if
 there is one, and then the test. A test that fails kills the mutant; one that
 passes means no test catches that way of being wrong.
@@ -327,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
 
     back_up(files)
     built = False
+    stale: tuple[list[str], dict[str, str] | None] | None = None  # a mutant's build is what is built
     stopped = None
     handlers = {}
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
@@ -343,7 +346,24 @@ def main(argv: list[str] | None = None) -> int:
                 if m.name in skip:
                     continue
                 mbuild = m.build if m.build is not None else build
+                if stale and not mbuild:
+                    # The last build was of a mutant, and this one has no build
+                    # of its own: its test would run what that mutant built.
+                    # Three Python mutants after five C++ ones tested nothing.
+                    try:
+                        ok = run(stale[0], a.timeout, stale[1]).returncode == 0
+                    except subprocess.TimeoutExpired:
+                        ok = False
+                    if not ok:
+                        o = Outcome(m.name, "BUILD FAILED", "the original could not be built again")
+                        outcomes.append(o)
+                        log.write(o.line() + "\n")
+                        print(o.line(), flush=True)
+                        continue
+                    stale = None
                 o = run_one(m, mbuild, m.test or test, a.timeout)
+                if mbuild:
+                    stale = (mbuild, m.env)
                 built = built or bool(mbuild)
                 outcomes.append(o)
                 log.write(o.line() + "\n")

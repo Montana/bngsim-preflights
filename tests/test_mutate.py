@@ -303,3 +303,23 @@ def test_restore_puts_a_file_back_in_a_later_second_than_the_mutant(project):
     assert mutate.restore() == [Path("calc.py")]
     assert (project / "calc.py").read_text() == CALC
     assert int(os.stat(project / "calc.py").st_mtime) > mutant_second
+
+
+def test_a_mutant_with_no_build_does_not_run_what_the_last_mutant_built(project):
+    # The "build" copies calc.py to built.py, and the test reads built.py, as a
+    # compiled extension is what its tests run. M2 changes a comment and has no
+    # build: left with M1's build, it would be judged on M1's bug.
+    import subprocess
+
+    (project / "test_calc.py").write_text(
+        "from built import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n")
+    build = [sys.executable, "-c", "import shutil; shutil.copy('calc.py', 'built.py')"]
+    subprocess.run(build, cwd=project, check=True, timeout=60)
+    m = write_mutants(project, [
+        {"name": "M1 subtracts", "file": "calc.py", "find": "a + b", "replace": "a - b", "build": build},
+        {"name": "M2 a comment", "file": "calc.py", "find": "# the sum", "replace": "# the total"},
+    ])
+    assert mutate.main([str(m)]) == 1
+    assert "M1 subtracts: KILLED" in log(project)
+    assert "M2 a comment: SURVIVED" in log(project)
+    assert (project / "built.py").read_text() == CALC
