@@ -1728,7 +1728,7 @@ MANUAL = [
     ("Remedies run", "every remedy a message or doc recommends, run on every control, at its edges (0, dominance)"),
     ("New refusals", "corpus sweep: nothing main ran is now refused; nothing main refused now returns silently wrong"),
     ("Main moved", "re-run the suite after the final rebase; 'claims cite the current main' lists the shas to recheck"),
-    ("Other platforms", "Docker linux/amd64 (CMAKE_BUILD_PARALLEL_LEVEL=3); Windows via windows-tail dispatch when the legs miss the tests"),
+    ("Other platforms", "Docker linux/amd64 (CMAKE_BUILD_PARALLEL_LEVEL=2); Windows via windows-tail dispatch when the legs miss the tests"),
     ("Other spellings", "every way a model writes the same condition: operator flipped, bound on the left, abs() and squares (#904's edges), <= beside <, == and != (#1758: the abs() spelling kept main's behaviour)"),
     ("Nearest case main got right", "a new keep/refuse/carry condition, run on its closest neighbour main handled: an in-tolerance undershoot, the overflowing law's own reactant (#1751: a regression the first tests could not see)"),
     ("Routes kept alike", "a step two routes both take (ODE and SSA, interpreted and compiled): one helper both call, or the body says why not (#1753: SSA's schedule shift is its own copy, without the ODE's repeat)"),

@@ -58,7 +58,9 @@ def container_script(tests: list[str], workers: int) -> str:
             "#!/bin/bash",
             "set -euo pipefail",
             "cd /src",
-            "export UV_LINK_MODE=copy CMAKE_BUILD_PARALLEL_LEVEL=3 SUNLOGGER_WARNING_FILENAME=/dev/null",
+            # 2 compiles at once: ExprTk's translation unit alone takes several GB,
+            # and 3 ran cc1plus out of memory in Docker Desktop's default 8 GB VM.
+            "export UV_LINK_MODE=copy CMAKE_BUILD_PARALLEL_LEVEL=2 SUNLOGGER_WARNING_FILENAME=/dev/null",
             "uv sync --frozen --extra test > /out/build.log 2>&1 || { tail -50 /out/build.log; exit 1; }",
             '.venv/bin/python -c "import bngsim, platform; '
             'print(bngsim.__version__, platform.machine(), platform.libc_ver())"',
