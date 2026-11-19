@@ -168,6 +168,8 @@ A clean run is not a review. The gate ends with a `MANUAL` list of what no scrip
 - **Routes kept alike:** does a step two routes both take use one helper, or does the description say why not? (#1753)
 - **A loop of costly steps:** for a loop whose step parses or evaluates sympy, even through a callable, what is its worst-case count, and how long does that case take against main? (#1758)
 - **Every input a gate lists:** for a gate on what a run is handed, is every field listed and tested alone? (#1753)
+- **State kept between runs:** does a second run on the same Simulator, a run on a new one, and the same run cut into `run_until` legs (warm and cold path) give the first run's numbers? (#1721, #1826)
+- **Scope words tested:** is every "only X reaches it" or "runs wherever it ran on main", in the description, the changelog or a surviving mutant's excuse, backed by a run, or cut? (#1721, #1763)
 
 And some checks are heuristics. "Linux run covers the touched tests" matches function names and topic words, so it can name a file that is only loosely related; that is why it warns rather than fails.
 

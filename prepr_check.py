@@ -1734,6 +1734,8 @@ MANUAL = [
     ("Routes kept alike", "a step two routes both take (ODE and SSA, interpreted and compiled): one helper both call, or the body says why not (#1753: SSA's schedule shift is its own copy, without the ODE's repeat)"),
     ("A loop of costly steps", "a loop whose step parses or evaluates sympy, directly or through a callable it is handed: its worst-case count, and that case timed against main (#1758: 64 parses a solve, 17 ms against 1.7)"),
     ("Every input a gate lists", "a gate on what a run is handed: list every field (crossing stops, probes, switch times, events) and test each one alone (#1753: switch times were missing)"),
+    ("State kept between runs", "anything a run keeps for later (user data, marks, a memo, a cached solver): run the same start twice on one Simulator, and once on a new one, and require them equal to the bit; and continued legs (run_until) against one run, on the warm and the cold path (#1721: a plain run reused the last run's marks; #1826)"),
+    ("Scope words tested", "every 'only X reaches it', 'runs wherever it ran on main' or 'unchanged elsewhere' in the description, the changelog or a mutant's excuse is backed by a run that would show otherwise, or cut (#1721's surviving mutant was a bug; #1763's run_diffrax)"),
 ]
 
 
