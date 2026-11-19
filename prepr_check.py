@@ -499,6 +499,35 @@ def check_overclaims(b: Branch, body: str | None):
     return flagged
 
 
+# Reach and comparison claims: the shape of every scope claim a review found
+# false on 2026-11-19 (#1721, #1763, #1751, #1753), and that OVERCLAIM's words
+# missed: "wherever it ran on main", "I found no run ... that returns", "each
+# alone is covered by the others", "as on main", "nothing a caller can reach".
+SCOPE_CLAIM = re.compile(
+    r"\bwherever\b|\bas (?:it (?:did|ran) )?on main\b|\b(?:same|alike) as (?:on )?main\b|\bas before\b"
+    r"|\b[Ii] found no\b|\bno (?:run|model|case|shape|caller|path|route)s? (?:\w+ ){0,3}(?:found|reach(?:es)?|returns?)\b"
+    r"|\bcovered by the others\b|\bcan(?:not|'t) (?:be )?reach|\bunreachable\b|\bnothing (?:\w+ ){0,6}(?:reach|reads|uses)\b"
+    r"|\bonly (?:\w+ ){0,6}reach(?:es)?\b")
+# A surviving mutant explained away: "survives ... because / since / only / nothing ...".
+SURVIVOR_EXCUSE = re.compile(r"\bsurviv\w*\b.*\b(?:because|since|so|only|nothing|cannot|can't)\b", re.I)
+
+
+def check_scope_claims(b: Branch, body: str | None):
+    """A sentence that says what a change reaches, or that it matches main, with
+    no run behind it (2026-11-19: all four reviews found one). Each line listed
+    wants the run that would show otherwise, named beside it, or to be cut."""
+    texts = [(p, ln) for p, ln in b.added if p.startswith(("changelog.d/", "docs/"))]
+    if body:
+        texts += [("PR body", ln) for ln in body.splitlines()]
+    hits = [(p, ln.strip()) for p, ln in texts if SCOPE_CLAIM.search(ln) or SURVIVOR_EXCUSE.search(ln)]
+    shown = "; ".join(f"{p}: {ln[:90]}" for p, ln in hits[:4]) + (f"; and {len(hits) - 4} more" if len(hits) > 4 else "")
+    record("WARN" if hits else "PASS", "scope claims backed by a run", shown or "none",
+           "#1721 'only a continued trajectory', #1763 'runs wherever it ran on main', #1751 'no joint shape "
+           "returns', #1753 'each alone is covered by the others': name the run (case and numbers) beside each, "
+           "or cut it; re-measure a reviewer's 'as on main' before repeating it")
+    return hits
+
+
 def check_scratch_names(b: Branch):
     """Never a stdlib name for a scratch script (#bisect.py fork bomb)."""
     bad = [f for f in b.untracked if f.endswith(".py") and Path(f).stem in STDLIB_NAMES]
@@ -1854,6 +1883,7 @@ def main():
     if a.full:
         check_full(b, a.docs_python)
     claims = check_overclaims(b, body)
+    check_scope_claims(b, body)
 
     head = sh(["git", "rev-parse", "--short", "HEAD"], repo).stdout.strip()
     print(f"prepr_check  {repo.name}  HEAD {head}  base {b.merge_base[:10]}  {len(b.files)} files changed\n")

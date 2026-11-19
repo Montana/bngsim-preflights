@@ -539,3 +539,46 @@ def test_a_longer_literal_with_the_words_out_of_order_passes(make_branch):
     b = _message_branch(make_branch, 'assert "no progress was made by the dense KLU solver" in str(e)\n', lib)
     pc.check_message_variants(b)
     assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+# --- scope claims ------------------------------------------------------------------
+
+# The six sentences 2026-11-19's reviews found false, as written.
+REVIEWED_FALSE = [
+    "So a model at h >= 1 does not pay the root's cost, and it runs wherever it ran on main.",
+    "I found no run of these shapes that returns, but the probe would not see a joint blow-up.",
+    "a model with an event trips more than one, so each alone is covered by the others.",
+    "the sensitivity is lost (0 for -2), as on main.",
+    "nothing a Python caller can reach reads it for a model that reads no clock.",
+    "The fourth survives: only the warm path, a continued trajectory, reuses it.",
+]
+
+
+@pytest.mark.parametrize("line", REVIEWED_FALSE)
+def test_a_scope_claim_a_review_found_false_warns(make_branch, line):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    pc.check_scope_claims(b, f"## Summary\n\n{line}\n")
+    status, detail = result("scope claims backed by a run")
+    assert status == "WARN" and "PR body" in detail
+
+
+def test_a_scope_claim_in_the_changelog_warns(make_branch):
+    b = make_branch({}, {"changelog.d/1.fixed.md": "- A run now gives the same as main wherever it ran.\n"})
+    pc.check_scope_claims(b, None)
+    status, detail = result("scope claims backed by a run")
+    assert status == "WARN" and "changelog.d/1.fixed.md" in detail
+
+
+def test_measured_sentences_pass(make_branch):
+    # Numbers and named runs, no claim about what else is reached or matches main.
+    body = ("## Summary\n\nX(5) = 2.796028127 on every route in the table; main fails with "
+            "CV_FIRST_RHSFUNC_ERR.\n\nMutants: 8 of 8 killed.\n")
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    pc.check_scope_claims(b, body)
+    assert result("scope claims backed by a run")[0] == "PASS"
+
+
+def test_more_than_four_scope_claims_are_counted(make_branch):
+    b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
+    pc.check_scope_claims(b, "\n".join(REVIEWED_FALSE))
+    assert "and 2 more" in result("scope claims backed by a run")[1]
