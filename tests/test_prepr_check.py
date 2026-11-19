@@ -429,3 +429,113 @@ def test_a_table_is_held_to_its_loosest_comparison(make_branch):
     b = make_branch({}, {"python/tests/test_a.py": text})
     pc.check_rounded_referee(b)
     assert result("referee constants hold their tolerance")[0] == "PASS"
+
+
+# ── asserted messages hold on every route (#1751) ───────────────────────────
+
+# #1751's shape: the engine fills the source of a non-finite reading in at run time,
+# and a compiled run's is "The compiled RHS".
+ENGINE = (
+    'const char *source = nullptr; // "The compiled RHS", "The RHS", "The Jacobian"\n'
+    'void describe(std::ostream &os, const W &w) {\n'
+    '    os << " " << w.source << " returned a non-finite value at t=" << w.t << ".";\n'
+    '}\n'
+)
+MESSAGE_WARN = {
+    "#1751's assert": 'assert "The RHS returned a non-finite value" in str(info.value)\n',
+    "a match=": 'with pytest.raises(E, match="The RHS returned a non-finite value"):\n    run()\n',
+    "a pattern that still asks for one route": 'with pytest.raises(E, match=r"The RHS returned a non-finite value at t=\\d"):\n    run()\n',
+}
+MESSAGE_PASS = {
+    "a pattern for both routes": 'with pytest.raises(E, match=r"The (compiled )?RHS returned a non-finite value"):\n    run()\n',
+    "the literal part only": 'assert "returned a non-finite value at t=" in str(info.value)\n',
+    "a message with no filled piece": 'assert "the run made no progress at all" in str(info.value)\n',
+}
+
+
+def _message_branch(make_branch, test: str, library: dict[str, str] | None = None):
+    lib = library or {"src/cvode_simulator.cpp": ENGINE}
+    return make_branch(lib, {**lib, "python/tests/test_a.py": test})
+
+
+@pytest.mark.parametrize("case", sorted(MESSAGE_WARN))
+def test_a_message_through_a_route_s_piece_warns(make_branch, case):
+    pc.check_message_variants(_message_branch(make_branch, MESSAGE_WARN[case]))
+    status, detail = result("asserted messages hold on every route")[:2]
+    assert status == "WARN"
+    assert '"The RHS" is w.source' in detail and "The compiled RHS" in detail
+
+
+def test_an_f_string_piece_with_a_longer_value_warns(make_branch):
+    lib = {"python/bngsim/a.py": 'KIND = "the compiled solver"\nOTHER = "the solver"\n'
+                                 'msg = f"{kind} stopped making progress at t={t}"\n'}
+    b = _message_branch(make_branch, 'assert "the solver stopped making progress" in str(e)\n', lib)
+    pc.check_message_variants(b)
+    assert result("asserted messages hold on every route")[0] == "WARN"
+
+
+@pytest.mark.parametrize("case", sorted(MESSAGE_PASS))
+def test_a_message_every_route_writes_passes(make_branch, case):
+    pc.check_message_variants(_message_branch(make_branch, MESSAGE_PASS[case]))
+    assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+def test_a_phrase_the_test_s_input_picks_passes(make_branch):
+    """The piece names which file to edit, and the test chose the input: neither phrase is
+    the other with words added, so which one appears is known (a false positive, 15 branches)."""
+    lib = {"python/bngsim/a.py": (
+        'def where(what):\n'
+        '    if "unit_conversion=" in what:\n'
+        '        return "the BNGL source and generate the network again"\n'
+        '    return "the SBML document and load the model again"\n'
+        'msg = f"Change it in {where(what)}. Model.frozen_params lists every such parameter."\n')}
+    b = _message_branch(make_branch, 'assert "Change it in the SBML document" in str(e)\n', lib)
+    pc.check_message_variants(b)
+    assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+def test_a_message_written_whole_across_lines_passes(make_branch):
+    """Adjacent literals are one message: "... the " / "saved state is the baseline" (#1723's
+    false positive, where "the saved state" also begins an f-string with a filled piece)."""
+    lib = {"python/bngsim/a.py": (
+        'NOTE = "is not yet the baseline"\n'  # without the join, "is the baseline" would have a longer value
+        'source = f"the saved state {reset_to!r}"\n'
+        'msg = ("a scan from the "\n'
+        '       "saved state is the baseline, and no write moves it")\n')}
+    b = _message_branch(make_branch, 'assert "the saved state is the baseline" in str(w)\n', lib)
+    pc.check_message_variants(b)
+    assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+def test_an_assert_already_on_main_is_not_this_branch_s(make_branch):
+    old = MESSAGE_WARN["#1751's assert"]
+    lib = {"src/cvode_simulator.cpp": ENGINE}
+    b = make_branch({**lib, "python/tests/test_a.py": old}, {**lib, "python/tests/test_a.py": old + "x = 1\n"})
+    pc.check_message_variants(b)
+    assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+def test_a_piece_after_the_literal_warns(make_branch):
+    """The filled-in piece can end the message as well as begin it."""
+    lib = {"src/a.cpp": ('const char *where = "the compiled RHS"; // or "the RHS"\n'
+                         'os << "a non-finite value was read in " << where;\n')}
+    b = _message_branch(make_branch, 'assert "a non-finite value was read in the RHS" in str(e)\n', lib)
+    pc.check_message_variants(b)
+    status, detail = result("asserted messages hold on every route")[:2]
+    assert status == "WARN" and '"the RHS" is where' in detail
+
+
+def test_a_literal_that_only_begins_like_the_piece_passes(make_branch):
+    """"The RHS was evaluated" is prose that starts like the piece, not a longer value of it."""
+    lib = {"src/cvode_simulator.cpp": ENGINE.replace('"The compiled RHS", "The RHS", ', '"The RHS was evaluated", ')}
+    pc.check_message_variants(_message_branch(make_branch, MESSAGE_WARN["#1751's assert"], lib))
+    assert result("asserted messages hold on every route")[0] == "PASS"
+
+
+def test_a_longer_literal_with_the_words_out_of_order_passes(make_branch):
+    """"the KLU and dense solver" is not "the dense KLU solver" with a word added."""
+    lib = {"src/a.cpp": ('const char *what = "the KLU and dense solver";\n'
+                         'os << "no progress was made by " << what;\n')}
+    b = _message_branch(make_branch, 'assert "no progress was made by the dense KLU solver" in str(e)\n', lib)
+    pc.check_message_variants(b)
+    assert result("asserted messages hold on every route")[0] == "PASS"

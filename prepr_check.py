@@ -357,6 +357,107 @@ def check_rounded_referee(b: Branch):
            "#1502: write the referee's full-precision value, as it prints it")
 
 
+# ─── the 2026-11-18 cloud reviews' lessons (#1751) ───────────────────────────
+
+_ASSERTED = re.compile(
+    r"""(?:match\s*=\s*r?|assert\s+r?)(["'])(?P<text>[^"'\n]{12,}?)\1(?:\s+in\b|\s*[,)])""")
+_SOURCE_SUFFIXES = (".cpp", ".hpp", ".h", ".cc", ".py")
+# A piece filled in at run time, just before or just after a literal: C++ `<< x <<` or
+# `+ x +`, a Python f-string's `{x}`.
+_FILLED_BEFORE = (r'(?:<<|\+)\s*(?P<what>[A-Za-z_][\w.\->()\[\]]*)\s*(?:<<|\+)\s*"\s*$', r"\{(?P<what>[^{}]+)\}\s*$")
+_FILLED_AFTER = (r'^\s*"\s*(?:<<|\+)\s*(?P<what>[A-Za-z_][\w.\->()\[\]]*)', r"^\s*\{(?P<what>[^{}]+)\}")
+
+
+def _library_lines(b: Branch):
+    for d in ("src/", "include/", "python/bngsim/"):
+        root = b.repo / d
+        if root.is_dir():
+            for f in sorted(root.rglob("*")):
+                if f.suffix in _SOURCE_SUFFIXES and f.is_file() and "third_party" not in f.parts:
+                    rel = str(f.relative_to(b.repo))
+                    for n, ln in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        yield rel, n, ln
+
+
+def _filled_piece(asked: str, lines: list[tuple[str, int, str]]) -> str | None:
+    """Where the asserted text runs past a literal of the code into a piece filled in at run
+    time, as `The RHS returned a non-finite value` does: the code writes `<< w.source << "
+    returned a non-finite value"`, and w.source is "RHS" or "compiled RHS". The place, or None."""
+    words = asked.split()
+    for k in range(len(words) - 1, 2, -1):  # the longest run of 3+ words, at either end
+        for run, before in ((" ".join(words[-k:]), True), (" ".join(words[:k]), False)):
+            for rel, n, ln in lines:
+                at = ln.find(run)
+                if at < 0:
+                    continue
+                side = ln[:at] if before else ln[at + len(run):]
+                for pat in (_FILLED_BEFORE if before else _FILLED_AFTER):
+                    m = re.search(pat, side)
+                    if m:
+                        rest = " ".join(words[:-k] if before else words[k:])
+                        other = _longer_literal(rest, lines)
+                        if other:
+                            return (f'"{rest}" is {m.group("what").strip()} at {rel}:{n}, '
+                                    f'which can also be "{other}"')
+    return None
+
+
+def _longer_literal(rest: str, lines: list[tuple[str, int, str]]) -> str | None:
+    """A literal of the code that is `rest` with one to three words added, as "The compiled
+    RHS" is "The RHS": the filled-in piece can say more on another route. A test that picks
+    its input picks which of two unrelated phrases appears, and is not flagged."""
+    want = rest.split()
+    if not want:
+        return None
+    for _, _, ln in lines:
+        for lit in re.findall(r'"([^"\n]{1,80})"', ln):
+            have = lit.split()
+            if not 0 < len(have) - len(want) <= 3:
+                continue
+            it = iter(have)
+            if all(w in it for w in want) and have[0] == want[0] and have[-1] == want[-1]:
+                return lit
+    return None
+
+
+def check_message_variants(b: Branch):
+    """A new test asks for words of a message the code fills in at run time (#1751): it asked
+    for "The RHS returned a non-finite value", where the code writes `<< w.source << "
+    returned ..."`, and a compiled run's w.source is "compiled RHS". It passed on the
+    interpreted route and failed under forced cc and forced MIR; CI's mir leg does not run
+    that file, so CI would not have shown it."""
+    paths = sorted({p for p, _ in b.added_in(("python/tests/",), (".py",))})
+    if not paths:
+        record("PASS", "asserted messages hold on every route", "no test added")
+        return
+    lines = [(rel, n, ln) for rel, n, ln in _library_lines(b) if '"' in ln or "{" in ln]
+    # The library as one text, with adjacent literals joined ("... the " / "saved state
+    # ..." in Python, "a " "b" in C++): a message the code writes whole is never flagged.
+    whole = re.sub(r"""["']\s*\n\s*[rRbBfF]{0,2}["']""", "", "\n".join(ln for _, _, ln in _library_lines(b)))
+    hits = []
+    for path in paths:
+        p, rows = b.repo / path, b.added_at.get(path, set())
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for m in _ASSERTED.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            asked = m.group("text")
+            if m.group(0).startswith("match"):
+                # A pattern: only the text before its first special character is literal.
+                # `The (compiled )?RHS ...` is cut to "The" and passes; `... at t=\d` keeps
+                # the "The RHS" it still asks for.
+                asked = re.split(r"[\\()\[\]{}.*+?|^$]", asked, maxsplit=1)[0]
+            if line not in rows or asked in whole:
+                continue
+            where = _filled_piece(asked, lines)
+            if where:
+                hits.append(f"{path}:{line}: {where}")
+    record("WARN" if hits else "PASS", "asserted messages hold on every route", "; ".join(hits[:3]) or "none run into a filled-in piece",
+           "#1751: ask for what every route says (a pattern such as 'The (compiled )?RHS returned'), "
+           "and run the file under BNGSIM_CODEGEN_THRESHOLD=1 and BNGSIM_CODEGEN_JIT=mir")
+
+
 def check_skips(b: Branch, python: str):
     """New pytest.skip reasons must be declared (#1653, test_skip_audit)."""
     new = [ln for p, ln in b.added_in(("python/tests/",), (".py",)) if "pytest.skip(" in ln or "skipif(" in ln]
@@ -1628,6 +1729,11 @@ MANUAL = [
     ("New refusals", "corpus sweep: nothing main ran is now refused; nothing main refused now returns silently wrong"),
     ("Main moved", "re-run the suite after the final rebase; 'claims cite the current main' lists the shas to recheck"),
     ("Other platforms", "Docker linux/amd64 (CMAKE_BUILD_PARALLEL_LEVEL=3); Windows via windows-tail dispatch when the legs miss the tests"),
+    ("Other spellings", "every way a model writes the same condition: operator flipped, bound on the left, abs() and squares (#904's edges), <= beside <, == and != (#1758: the abs() spelling kept main's behaviour)"),
+    ("Nearest case main got right", "a new keep/refuse/carry condition, run on its closest neighbour main handled: an in-tolerance undershoot, the overflowing law's own reactant (#1751: a regression the first tests could not see)"),
+    ("Routes kept alike", "a step two routes both take (ODE and SSA, interpreted and compiled): one helper both call, or the body says why not (#1753: SSA's schedule shift is its own copy, without the ODE's repeat)"),
+    ("A loop of costly steps", "a loop whose step parses or evaluates sympy, directly or through a callable it is handed: its worst-case count, and that case timed against main (#1758: 64 parses a solve, 17 ms against 1.7)"),
+    ("Every input a gate lists", "a gate on what a run is handed: list every field (crossing stops, probes, switch times, events) and test each one alone (#1753: switch times were missing)"),
 ]
 
 
@@ -1685,6 +1791,7 @@ def main():
     check_stacklevel(b)
     check_text_encoding(b)
     check_rounded_referee(b)
+    check_message_variants(b)
     check_skips(b, python)
     check_strict_xfail(b, a.issue)
     check_scratch_names(b)

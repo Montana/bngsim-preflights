@@ -146,6 +146,16 @@ Each of these happened, and was caught by eye or by luck.
 | Text I/O names its encoding (WARN) | An added `open()` in text mode, `read_text()`, `write_text()` or text-mode temporary file in `python/bngsim/` with no `encoding=`. Text then goes in the locale's encoding: UTF-8 on macOS and Linux, cp1252 on Windows. A call that spans lines is read whole; calls already on main are left alone | #1653: `write_net` wrote `Aµ()` as a byte the loader refuses, and could not write `AΩ()` at all; #1665 |
 | Referee constants hold their tolerance (WARN) | A measured-looking value (five or more significant digits) whose last digit is worth more than a tenth of the tolerance it is compared under, in `pytest.approx` or `assert_allclose`, named constants and parametrize tables included. A table is held to the loosest tolerance among the comparisons that read a variable | #1502: run_network's `0.896350` under `rel=1e-6` is 5.6e-7 off by rounding alone, so a 2.3x margin read as a pass |
 
+### From three cloud reviews: #1751, #1753 and #1758
+
+| Check | It catches | From |
+|---|---|---|
+| Asserted messages hold on every route (WARN) | A new test that asks for words of a message the code fills in at run time (`<< x <<`, `+ x +`, an f-string's `{x}`), where the code also has a longer value for that piece. A `match=` pattern is read up to its first special character, so one written for both routes (`The (compiled )?RHS`) passes; a message written whole, adjacent literals joined, is never flagged | #1751: a test asked for "The RHS returned a non-finite value"; the code writes `<< w.source << " returned ..."`, and a compiled run's `w.source` is "The compiled RHS". It failed under forced cc and forced MIR, and CI's `mir` leg does not run that file |
+
+Tried on the commits the reviews flagged and on the fixes: it warns on #1751's flagged commit and passes its fix, #1753's and #1758's commits, and 18 other branches, including 15 old ones that count about 1,100 of main's files as added. Eleven mutants of the check, all killed.
+
+The other two findings could not be checked reliably, so they are in the `MANUAL` list. #1753's copy of the schedule shift used other names and operators (`shifted.t_start = times_in.t_start - origin` against `elapsed.t_start -= o`), and a version that renames identifiers also flagged #1751's fix, whose sibling call sites look alike on purpose. #1758's sympy parse ran inside a callable the loop was handed, which a line-based check cannot follow.
+
 ## What it cannot judge
 
 A clean run is not a review. The gate ends with a `MANUAL` list of what no script can decide, each to be answered in the description:
@@ -153,6 +163,11 @@ A clean run is not a review. The gate ends with a `MANUAL` list of what no scrip
 - **Siblings:** does every engine, route and loader that reads the same thing get the fix, or a reason it doesn't need it?
 - **Cost at scale:** has the change been timed against main on a large model, not only the issue's small one?
 - **Fixtures that can tell:** would a plausible wrong implementation give a different number?
+- **Other spellings:** does the fix hold for every way a model writes the same condition: the operator flipped, the bound on the left, `abs()` and squares, `<=` beside `<`? (#1758)
+- **Nearest case main got right:** has a new keep, refuse or carry condition been run on its closest neighbour that main handled? (#1751)
+- **Routes kept alike:** does a step two routes both take use one helper, or does the description say why not? (#1753)
+- **A loop of costly steps:** for a loop whose step parses or evaluates sympy, even through a callable, what is its worst-case count, and how long does that case take against main? (#1758)
+- **Every input a gate lists:** for a gate on what a run is handed, is every field listed and tested alone? (#1753)
 
 And some checks are heuristics. "Linux run covers the touched tests" matches function names and topic words, so it can name a file that is only loosely related; that is why it warns rather than fails.
 
