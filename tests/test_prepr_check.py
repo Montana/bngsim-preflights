@@ -307,3 +307,125 @@ def test_a_mutant_whose_name_holds_a_colon_is_counted(tmp_path):
     )
     pc.check_evidence("3. **Mutants: 2 of 2 killed.**", ev)
     assert result("body numbers backed by logs")[0] == "PASS"
+
+
+# ── text I/O names its encoding (#1653, #1665) ──────────────────────────────
+
+ENCODING_WARN = {
+    "a read_text": "from pathlib import Path\ntext = Path('m.bngl').read_text()\n",
+    "a write_text": "from pathlib import Path\nPath('m.net').write_text(text)\n",
+    "a text open": "with open(path) as f:\n    pass\n",
+    "an open for writing": "with open(path, 'w') as f:\n    pass\n",
+    "an open across lines": "with open(\n    path,\n    mode='w',\n) as f:\n    pass\n",
+    "a text temporary file": "import tempfile\ntempfile.NamedTemporaryFile('w', suffix='.net')\n",
+}
+ENCODING_PASS = {
+    "an encoding": "from pathlib import Path\nPath('m.net').write_text(text, encoding='utf-8')\n",
+    "an encoding on the next line": "with open(\n    path,\n    encoding='utf-8',\n) as f:\n    pass\n",
+    "a binary open": "with open(path, 'rb') as f:\n    pass\n",
+    "a binary mode keyword": "with open(path, mode='wb') as f:\n    pass\n",
+    "a default temporary file": "import tempfile\ntempfile.NamedTemporaryFile(suffix='.h5')\n",
+    "os.open": "import os\nfd = os.open(path, os.O_RDONLY)\n",
+    "a method named open": "session.open(path)\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(ENCODING_WARN))
+def test_text_io_without_an_encoding_warns(make_branch, case):
+    b = make_branch({}, {"python/bngsim/a.py": ENCODING_WARN[case]})
+    pc.check_text_encoding(b)
+    assert result("text I/O names its encoding")[0] == "WARN"
+
+
+@pytest.mark.parametrize("case", sorted(ENCODING_PASS))
+def test_text_io_with_an_encoding_or_in_binary_passes(make_branch, case):
+    b = make_branch({}, {"python/bngsim/a.py": ENCODING_PASS[case]})
+    pc.check_text_encoding(b)
+    assert result("text I/O names its encoding")[0] == "PASS"
+
+
+def test_an_untouched_call_is_not_this_branch_s(make_branch):
+    """A call already on main is left alone; only the lines the branch adds count."""
+    old = "from pathlib import Path\ntext = Path('m.bngl').read_text()\n"
+    b = make_branch({"python/bngsim/a.py": old}, {"python/bngsim/a.py": old + "x = 1\n"})
+    pc.check_text_encoding(b)
+    assert result("text I/O names its encoding")[0] == "PASS"
+
+
+def test_a_test_file_s_text_io_is_not_the_library_s(make_branch):
+    b = make_branch({}, {"python/tests/test_a.py": "open(path).read()\n"})
+    pc.check_text_encoding(b)
+    assert result("text I/O names its encoding")[0] == "PASS"
+
+
+# ── referee constants hold their tolerance (#1502) ──────────────────────────
+
+REFEREE_WARN = {
+    # #1502's own: run_network's six digits under rel=1e-6.
+    "six digits under 1e-6": "assert p == pytest.approx(0.896350, rel=1e-6)\n",
+    "a named tolerance": "TOL = 1e-6\n\ndef test_x():\n    assert p == pytest.approx(2.574841, rel=TOL)\n",
+    "a named referee": "RN = 0.896350\nTOL = 1e-6\n\ndef test_x():\n    assert p == pytest.approx(RN, rel=TOL)\n",
+    "assert_allclose": "np.testing.assert_allclose(p, 0.896350, rtol=1e-6)\n",
+}
+REFEREE_PASS = {
+    "full precision": "assert p == pytest.approx(0.896350382205, rel=1e-8)\n",
+    "a short exact value": "assert p == pytest.approx(0.5, rel=1e-12)\n",
+    "an integer count": "assert n == pytest.approx(123456, rel=1e-9)\n",
+    "a loose tolerance": "assert p == pytest.approx(0.896350, rel=1e-3)\n",
+    "no tolerance": "assert p == pytest.approx(0.896350)\n",
+    "an expression": "assert p == pytest.approx(2 + 5 * np.exp(-1), rel=1e-12)\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFEREE_WARN))
+def test_a_referee_rounded_past_its_tolerance_warns(make_branch, case):
+    b = make_branch({}, {"python/tests/test_a.py": REFEREE_WARN[case]})
+    pc.check_rounded_referee(b)
+    assert result("referee constants hold their tolerance")[0] == "WARN"
+
+
+@pytest.mark.parametrize("case", sorted(REFEREE_PASS))
+def test_a_referee_that_holds_its_tolerance_passes(make_branch, case):
+    b = make_branch({}, {"python/tests/test_a.py": REFEREE_PASS[case]})
+    pc.check_rounded_referee(b)
+    assert result("referee constants hold their tolerance")[0] == "PASS"
+
+
+def test_a_rounded_referee_in_a_parametrize_table_warns(make_branch):
+    """#1502's own shape: the values reached the comparison through a table."""
+    text = (
+        'TWO = {\n    "s-e1": ("1,2", 0.896350),\n    "homodimer": ("1,1", 4.968136),\n}\n\n'
+        '@pytest.mark.parametrize("case", sorted(TWO))\n'
+        "def test_x(case):\n    reactants, p_at_1 = TWO[case]\n"
+        "    assert run(reactants) == pytest.approx(p_at_1, rel=1e-6)\n"
+    )
+    b = make_branch({}, {"python/tests/test_a.py": text})
+    pc.check_rounded_referee(b)
+    status, detail = result("referee constants hold their tolerance")[:2]
+    assert status == "WARN" and "0.896350" in detail
+
+
+def test_a_full_precision_table_passes(make_branch):
+    text = (
+        'TWO = {"s-e1": ("1,2", 0.896350382205)}\n\n'
+        "def test_x():\n    reactants, p_at_1 = TWO['s-e1']\n"
+        "    assert run(reactants) == pytest.approx(p_at_1, rel=1e-8)\n"
+    )
+    b = make_branch({}, {"python/tests/test_a.py": text})
+    pc.check_rounded_referee(b)
+    assert result("referee constants hold their tolerance")[0] == "PASS"
+
+
+def test_a_table_is_held_to_its_loosest_comparison(make_branch):
+    """#1502's file: one table fed a closed-form check at rel=1e-12 and a referee check at
+    a looser tolerance. Which column reaches which is not known, so the table is held to
+    the loosest: six digits pass under 1e-2, where 1e-12 would flag every measured value."""
+    text = (
+        'TWO = {"s-e1": ("1,2", 0.896350, rate(10.0, 1.0))}\n\n'
+        "def test_x():\n    reactants, p_at_1, rate_at_0 = TWO['s-e1']\n"
+        "    assert rhs(reactants) == pytest.approx(rate_at_0, rel=1e-12)\n"
+        "    assert run(reactants) == pytest.approx(p_at_1, rel=1e-2)\n"
+    )
+    b = make_branch({}, {"python/tests/test_a.py": text})
+    pc.check_rounded_referee(b)
+    assert result("referee constants hold their tolerance")[0] == "PASS"

@@ -227,6 +227,136 @@ def check_stacklevel(b: Branch):
            "use _stacklevel_outside_bngsim() (class 5; repeated 5 times)")
 
 
+_TEXT_IO = re.compile(r"(?<![\w.])open\(|\.read_text\(|\.write_text\(|NamedTemporaryFile\(|TemporaryFile\(")
+
+
+def _call_args(text: str, start: int) -> str:
+    """The text of the call whose `(` ends at text[start - 1], up to its matching `)`."""
+    depth, i = 1, start
+    while i < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[i], 0)
+        i += 1
+    return text[start:i - 1]
+
+
+def check_text_encoding(b: Branch):
+    """Text read or written in the locale's encoding (#1653, #1665): UTF-8 on macOS and Linux,
+    cp1252 on Windows. write_net wrote `Aµ()` as a byte the loader refuses, and could not
+    write `AΩ()` at all. bngsim's ruff selection does not include PLW1514."""
+    hits = []
+    for path in sorted({p for p, _ in b.added_in(("python/bngsim/",), (".py",))}):
+        rows, p = b.added_at.get(path, set()), b.repo / path
+        if not rows or not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for m in _TEXT_IO.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            if line not in rows:
+                continue
+            args = _call_args(text, m.end())
+            name = m.group(0).rstrip("(").lstrip(".")
+            if "encoding" in args:
+                continue
+            if name in ("open", "NamedTemporaryFile", "TemporaryFile"):
+                mode = re.search(r"""(?:^|,|mode\s*=)\s*["']([rwxabt+]+)["']""", args)
+                if mode is None and name != "open":
+                    continue  # a TemporaryFile's default mode is binary
+                if "b" in (mode.group(1) if mode else "r"):
+                    continue
+            hits.append(f"{path}:{line}: {name}()")
+    record("WARN" if hits else "PASS", "text I/O names its encoding", "; ".join(hits[:4]) or "none added",
+           "#1653, #1665: pass encoding='utf-8' (and errors= where bytes may not decode)")
+
+
+_APPROX = re.compile(r"(?:approx|assert_allclose)\((?P<args>[^()]*(?:\([^()]*\)[^()]*)*)\)")
+_FLOAT = r"[-+]?(?:\d[\d_]*\.\d*|\.\d+|\d[\d_]*)(?:[eE][-+]?\d+)?"
+
+
+def _relative_half_ulp(literal: str) -> tuple[int, float] | None:
+    """(significant digits, relative rounding of the literal's last digit), or None for 0."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        d = Decimal(literal.replace("_", ""))
+    except InvalidOperation:
+        return None
+    if d == 0:
+        return None
+    digits = d.as_tuple().digits
+    while len(digits) > 1 and digits[0] == 0:
+        digits = digits[1:]
+    return len(digits), float(Decimal(5).scaleb(d.as_tuple().exponent - 1) / abs(d))
+
+
+def _table_literals(text: str, rows: set[int]) -> list[str]:
+    """The decimal literals the branch adds to the file's module-level UPPERCASE tables
+    (dicts, lists, tuples), strings left out."""
+    out = []
+    for m in re.finditer(r"^[A-Z][A-Z0-9_]*\s*(?::[^=\n]*)?=\s*[\[({]", text, re.M):
+        start = m.end()
+        depth, i = 1, start
+        while i < len(text) and depth:
+            depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(text[i], 0)
+            i += 1
+        block = text[start:i]
+        first = text.count("\n", 0, start) + 1
+        for n, ln in enumerate(block.split("\n")):
+            if first + n not in rows:
+                continue
+            code = re.sub(r"\"[^\"]*\"|'[^']*'|#.*", "", ln)
+            out += [v for v in re.findall(_FLOAT, code) if re.search(r"[.eE]", v)]
+    return out
+
+
+def _rounded(path: str, where, values: list[str], tol: str) -> list[str]:
+    out = []
+    for value in dict.fromkeys(values):
+        # An integer literal is a count, exact; only a decimal can be a rounded reading.
+        measured = re.fullmatch(_FLOAT, value) and re.search(r"[.eE]", value)
+        rounding = _relative_half_ulp(value) if measured else None
+        if rounding and rounding[0] >= 5 and rounding[1] > float(tol) / 10:
+            out.append(f"{path}:{where}: {value} rounds by {rounding[1]:.1e} of rel={tol}")
+    return out
+
+
+def check_rounded_referee(b: Branch):
+    """A referee's value written to fewer digits than its tolerance can hold (#1502): run_network's
+    0.896350 under rel=1e-6 is 5.6e-7 off by rounding alone, so a 2.3x margin read as a pass.
+    Short literals (0.5, 10.0) are taken as exact; five or more digits look measured."""
+    hits = []
+    for path in sorted({p for p, _ in b.added_in(("python/tests/",), (".py",))}):
+        p = b.repo / path
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        consts = {m.group(1): m.group(2)
+                  for m in re.finditer(rf"^([A-Z][A-Z0-9_]*)\s*=\s*({_FLOAT})\s*(?:#.*)?$", text, re.M)}
+        rows = b.added_at.get(path, set())
+        tables = _table_literals(text, rows)
+        variable_tols: list[str] = []
+        for m in _APPROX.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            if line not in rows:
+                continue
+            args = [a.strip() for a in m.group("args").split(",")]
+            tol = next((a.split("=", 1)[1].strip() for a in args if re.match(r"r(?:el|tol)\s*=", a)), None)
+            tol = consts.get(tol, tol)
+            if tol is None or not re.fullmatch(_FLOAT, tol):
+                continue
+            values = [consts.get(a, a) for a in args if "=" not in a]
+            # A value read from a variable came from somewhere: in a test, most often a
+            # parametrize table, as #1502's run_network values did. Which call reads which
+            # column is not known, so a table is held to the loosest such tolerance.
+            if any(not re.fullmatch(_FLOAT, v) and re.fullmatch(r"[a-z_][\w.\[\]]*", v) for v in values):
+                variable_tols.append(tol)
+            hits += _rounded(path, line, values, tol)
+        if tables and variable_tols:
+            loosest = max(variable_tols, key=float)
+            hits += _rounded(path, "table", tables, loosest)
+    record("WARN" if hits else "PASS", "referee constants hold their tolerance", "; ".join(hits[:4]) or "none",
+           "#1502: write the referee's full-precision value, as it prints it")
+
+
 def check_skips(b: Branch, python: str):
     """New pytest.skip reasons must be declared (#1653, test_skip_audit)."""
     new = [ln for p, ln in b.added_in(("python/tests/",), (".py",)) if "pytest.skip(" in ln or "skipif(" in ln]
@@ -1553,6 +1683,8 @@ def main():
     check_changelog(b)
     check_untracked_new_files(b)
     check_stacklevel(b)
+    check_text_encoding(b)
+    check_rounded_referee(b)
     check_skips(b, python)
     check_strict_xfail(b, a.issue)
     check_scratch_names(b)

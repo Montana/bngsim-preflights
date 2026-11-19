@@ -139,6 +139,13 @@ Each of these happened, and was caught by eye or by luck.
 | No wall-clock bound in a new test | An added `assert elapsed < 2.0`, or any bound on a measured time, in a test file that reads a clock. It fails on a busy runner and passes on a rerun | Two red CI legs in one week that were timing tests, not bugs |
 | A mutant that tested nothing | A `NOT APPLIED`, `BUILD FAILED` or `TEST ERROR` line in a mutant log, or a run that ends `INTERRUPTED`: the count in the description is then not a count | Three mutants file entries gone stale in one week, each reading as a result until the log was opened |
 
+### From the encoding and referee work: #1502 and #1653
+
+| Check | It catches | From |
+|---|---|---|
+| Text I/O names its encoding (WARN) | An added `open()` in text mode, `read_text()`, `write_text()` or text-mode temporary file in `python/bngsim/` with no `encoding=`. Text then goes in the locale's encoding: UTF-8 on macOS and Linux, cp1252 on Windows. A call that spans lines is read whole; calls already on main are left alone | #1653: `write_net` wrote `Aµ()` as a byte the loader refuses, and could not write `AΩ()` at all; #1665 |
+| Referee constants hold their tolerance (WARN) | A measured-looking value (five or more significant digits) whose last digit is worth more than a tenth of the tolerance it is compared under, in `pytest.approx` or `assert_allclose`, named constants and parametrize tables included. A table is held to the loosest tolerance among the comparisons that read a variable | #1502: run_network's `0.896350` under `rel=1e-6` is 5.6e-7 off by rounding alone, so a 2.3x margin read as a pass |
+
 ## What it cannot judge
 
 A clean run is not a review. The gate ends with a `MANUAL` list of what no script can decide, each to be answered in the description:
@@ -279,13 +286,41 @@ bngsim 0.17.2: 600 constant expressions over %, mod, frac, rint, round, floor, c
 
 That is main. With #1809 and #1815 it is 2 expressions, both a product of two 17-digit literals under `%`, where sympy multiplies at more than a double's precision before the fold. The same seed writes the same expressions, so a count can be compared before and after a fix. A reader that declines or raises is listed and is not a disagreement. Exit status 1 if any reader gives a number the engine does not.
 
+## `ci_triage.py`
+
+Why did a CI run go red: the change, or the infrastructure? Give it a run or job URL:
+
+```bash
+python ci_triage.py https://github.com/lanl/bngsim/actions/runs/44360516767
+python ci_triage.py 44360516767 --job 135000275395 --repo lanl/bngsim
+```
+
+```
+wheels · Merge pull request #1823 from Montana/fix/1822-coinciding-switch-rema… · a61c9c6d · failure
+  never started   wheels · macos-15: no runner was assigned; it waited 2 h 55 min and was cancelled
+not the change: never started (a maintainer can re-run it: gh run rerun <id> --failed)
+```
+
+Each job that did not succeed is put in one class, from GitHub's record of it and its log:
+
+| Class | How it is known | About the change? |
+|---|---|---|
+| never started | no runner was assigned, and no step ran | no |
+| superseded | cancelled after a newer run of the same workflow and branch began | no |
+| timed out | the log says the job exceeded its time limit | no |
+| infrastructure | DNS (`Could not resolve host`, `Temporary failure resolving`), an Ubuntu mirror (apt's `Ign:` lines, `Failed to fetch`), the artifact service's HTML error page, a lost runner, a full disk; or, marked *likely*, a failed setup step (install, checkout, cache, download) before any test ran | no |
+| test failure | pytest's `FAILED` and `ERROR` lines, ctest's `***Failed`, or a step's `##[error]`, quoted | **yes** |
+| unexplained | none of the above, with the log's last lines | **yes** |
+
+It was checked against the runs it was written from: the 2026-11-11 runner DNS outage (every job infrastructure, the LAPACK legs' apt timeout among them), #1633's artifact-service error, #1640's NFsim pass floor (a test failure, quoting the floor's message), and #1823's macOS wheel that never got a runner. Exit status 1 when a job points at the change. Re-running a run needs write access to the repository, so a fork's author asks a maintainer. Needs `gh`, logged in.
+
 ## Install
 
 ```bash
 pipx install git+https://github.com/Montana/bngsim-preflights
 ```
 
-This installs six commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate`, `bngsim-linux`, `bngsim-kinks` and `bngsim-consts`. Each script also runs on its own with `python <script>.py`.
+This installs seven commands: `bngsim-prepr`, `bngsim-floor`, `bngsim-mutate`, `bngsim-linux`, `bngsim-kinks`, `bngsim-consts` and `bngsim-triage`. Each script also runs on its own with `python <script>.py`.
 
 ## Tests
 
@@ -294,7 +329,7 @@ python -m pip install ".[test]"
 python -m ruff check . && python -m pytest -q
 ```
 
-The tests build small git repositories and projects in temporary directories. Docker is not needed. CI runs them on Linux and macOS, with Python 3.10 and 3.13. The tests were themselves checked with `mutate.py`: 18 mutants of the four scripts, and 41 of the checks and safeguards added since, all killed.
+The tests build small git repositories and projects in temporary directories. Docker is not needed. CI runs them on Linux and macOS, with Python 3.10 and 3.13. The tests were themselves checked with `mutate.py`: 18 mutants of the four scripts, and 52 of the checks and safeguards added since, all killed.
 
 ## Requirements
 

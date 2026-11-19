@@ -20,9 +20,10 @@ bngsim-mutate = "mutate:main"
 bngsim-linux = "linux_check:main"
 bngsim-kinks = "kink_check:main"
 bngsim-consts = "const_check:main"
+bngsim-triage = "ci_triage:main"
 
 [tool.setuptools]
-py-modules = ["prepr_check", "floor_for_branch", "mutate", "linux_check", "kink_check", "const_check"]
+py-modules = ["prepr_check", "floor_for_branch", "mutate", "linux_check", "kink_check", "const_check", "ci_triage"]
 
 [tool.ruff]
 line-length = 120
