@@ -502,12 +502,17 @@ def check_overclaims(b: Branch, body: str | None):
 # Reach and comparison claims: the shape of every scope claim a review found
 # false on 2026-11-19 (#1721, #1763, #1751, #1753), and that OVERCLAIM's words
 # missed: "wherever it ran on main", "I found no run ... that returns", "each
-# alone is covered by the others", "as on main", "nothing a caller can reach".
+# alone is covered by the others", "as on main", "nothing a caller can reach";
+# and (#1767) which way an approximation errs.
 SCOPE_CLAIM = re.compile(
     r"\bwherever\b|\bas (?:it (?:did|ran) )?on main\b|\b(?:same|alike) as (?:on )?main\b|\bas before\b"
     r"|\b[Ii] found no\b|\bno (?:run|model|case|shape|caller|path|route)s? (?:\w+ ){0,3}(?:found|reach(?:es)?|returns?)\b"
     r"|\bcovered by the others\b|\bcan(?:not|'t) (?:be )?reach|\bunreachable\b|\bnothing (?:\w+ ){0,6}(?:reach|reads|uses)\b"
-    r"|\bonly (?:\w+ ){0,6}reach(?:es)?\b")
+    r"|\bonly (?:\w+ ){0,6}reach(?:es)?\b"
+    # Which way an approximation errs ("can give a warning that is not needed,
+    # not miss one": #1767, where a review found the one it missed).
+    r"|\b(?:not|never|cannot|can't|won't|doesn't|does not) miss\w*\b|\bmiss(?:es)? none\b"
+    r"|\bno \w+ (?:is |are )?(?:ever )?missed\b|\berrs? (?:only )?on the (?:safe )?side\b|\bon the safe side\b")
 # A surviving mutant explained away: "survives ... because / since / only / nothing ...".
 SURVIVOR_EXCUSE = re.compile(r"\bsurviv\w*\b.*\b(?:because|since|so|only|nothing|cannot|can't)\b", re.I)
 

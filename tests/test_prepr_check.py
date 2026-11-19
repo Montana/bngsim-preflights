@@ -551,6 +551,8 @@ REVIEWED_FALSE = [
     "the sensitivity is lost (0 for -2), as on main.",
     "nothing a Python caller can reach reads it for a model that reads no clock.",
     "The fourth survives: only the warm path, a continued trajectory, reuses it.",
+    # #1767: the review found the warning it said could not be missed.
+    "either can give a warning that is not needed, not miss one.",
 ]
 
 
@@ -581,4 +583,4 @@ def test_measured_sentences_pass(make_branch):
 def test_more_than_four_scope_claims_are_counted(make_branch):
     b = make_branch({}, {"python/bngsim/a.py": "x = 1\n"})
     pc.check_scope_claims(b, "\n".join(REVIEWED_FALSE))
-    assert "and 2 more" in result("scope claims backed by a run")[1]
+    assert "and 3 more" in result("scope claims backed by a run")[1]
