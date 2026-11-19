@@ -242,6 +242,25 @@ python linux_check.py --dry-run                           # print the commands o
 
 Before running anything, it checks that a container actually starts: after an update, Docker Desktop can answer `docker info` and still start nothing. With `--compare-main`, each test file that failed is run again on main in the same image. A test that fails there too fails because of the image (no `.git` in the copy, or the root user), not because of the change. The exit status is 0 only when nothing fails that main passes.
 
+**The image.** `linux_check.py` runs `bngsim-linux-amd64:latest` (`--image` picks another). That image is defined and built in [bngsim-docker](https://github.com/Montana/bngsim-docker):
+
+```bash
+git clone https://github.com/Montana/bngsim-docker && cd bngsim-docker
+python bngsim_docker.py build      # bngsim-linux-amd64:latest, the image linux_check.py runs
+```
+
+bngsim-docker also has what `linux_check.py` does not:
+
+| | `linux_check.py` | [bngsim-docker](https://github.com/Montana/bngsim-docker) |
+|---|---|---|
+| Debian 12 x86-64 image | runs it | defines and builds it |
+| Ubuntu 26.04 image, set up as bngsim's CI (`ubuntu-latest`) | | `--kind ubuntu` |
+| BioNetGen image, so the BNG2.pl tests run | | `--kind bionetgen` |
+| arm64 | | `--arch arm64` |
+| Failures sorted against main | `--compare-main` | `compare`, or `test` against a list of standing failures |
+| Compiler cache between runs | | a ccache volume per image: a second run of bngsim main (build plus one test file) took 90 s, against 483 s cold |
+| Docker Compose services | | `suite`, `suite-ubuntu`, `suite-bionetgen`, `shell` |
+
 ## `kink_check.py`
 
 bngsim evaluates model math in two kinds of place: the engine (ExprTk, in C++) computes the run, and Python readers built on sympy and numpy compute what the run needs beside it, such as a crossing's threshold, a sensitivity seed, or the symbolic rate law the sensitivity RHS is built from. Where a reader defines a function otherwise than the engine, the run is right and the number beside it is wrong, with no error. `kink_check.py` evaluates expressions at their kinks (halves, quarters, zero and their negatives, where rounding and modulo part ways) through the engine and through each reader, and lists every disagreement.
@@ -336,3 +355,4 @@ The tests build small git repositories and projects in temporary directories. Do
 - Python 3.10 or later, `git`, and the [`gh`](https://cli.github.com/) CLI for the checks that read GitHub.
 - For the test checks, an interpreter with bngsim installed: the worktree's own `.venv` by default, or `--python`.
 - For checks that run BNG2.pl, `BNGPATH` set to an absolute path. A relative one breaks the BioNetGen tests that change directory.
+- For `linux_check.py`, Docker and the `bngsim-linux-amd64:latest` image, built from [bngsim-docker](https://github.com/Montana/bngsim-docker).
