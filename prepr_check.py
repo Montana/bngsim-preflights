@@ -1823,6 +1823,42 @@ def check_merged_run(b: Branch, cli: Path, arch: str):
                f"(logs: {out})", lesson)
 
 
+# ─── 2026-11-20: a remedy a message prints is run as written (#1723) ─────────
+
+# Code a message tells the user to run: a call on a model or simulator, a
+# lambda, or a keyword hook. Read in the string literals the branch adds.
+_LITERAL = re.compile(r"""(["'])((?:\\.|(?!\1).)*)\1""")
+_REMEDY_CODE = re.compile(r"\blambda\b[^:]*:|\b(?:model|sim|simulator|result)\.\w+\(|\bon_point\s*=|\bon_\w+\s*=\s*lambda")
+
+
+def check_message_remedies(b: Branch):
+    """A message that hands the user code to run is run as written (#1723).
+
+    #1723's warning told the user `on_point=lambda model, value:
+    model.set_concentration(name, value)`. It was run only where the initial
+    condition is the parameter itself; with `D = 2*A0`, or `A = A0*s`, it set
+    the wrong value, and a review found it. The MANUAL row "Remedies run" asked
+    for this, but no check pointed at the line. This one does: each string
+    literal the branch adds under python/bngsim/ that holds code to run is
+    listed, to be run as written, on the plain case and on a derived one."""
+    name = "message remedies run as written"
+    hits = []
+    for path in sorted({p for p, _ in b.added_in(prefix=("python/bngsim/",), suffix=(".py",))}):
+        for ln in b.prose_added(path):
+            # Only inside the line's string literals: a line of code with a comment
+            # is prose to prose_added, and its call is not a message.
+            literals = " ".join(m.group(2) for m in _LITERAL.finditer(ln.split("#", 1)[0] if ln.lstrip()[:1] not in "\"'" else ln))
+            if _REMEDY_CODE.search(literals):
+                hits.append(f"{path}: {ln.strip()[:100]}")
+    if not hits:
+        record("PASS", name, "no added message hands the user code to run")
+        return
+    more = f"; and {len(hits) - 4} more" if len(hits) > 4 else ""
+    record("WARN", name, f"{len(hits)} added message line(s) give code to run: " + "; ".join(hits[:4]) + more,
+           "#1723: run each as written, on the plain case and on a derived one (an initial condition that is "
+           "an expression of the parameter, a renamed or scaled input)")
+
+
 MANUAL = [
     ("Siblings", "every engine/route/loader that reads the same thing: run, run_batch, parameter_scan, bifurcate, steady_state(_batch), sensitivities, clones, continued runs, SSA/PSA/NFsim/RuleMonkey/JAX, codegen cc/MIR — each fixed, tested or 'unaffected because'"),
     ("Cost at scale", "paired interleaved timing vs main on the issue's model AND a large one (and a pathological one: cycles, deep nesting, 2,000 rows/stops); gate new walks on a cheap predicate"),
@@ -1831,7 +1867,7 @@ MANUAL = [
     ("Degenerate shapes", "0, empty, lo > hi, repeated sample time, zero replicates, NaN/inf each side, negative and far t_start"),
     ("Chains and order", "dependency walks 2–3 deep, self-reference, declarations reversed"),
     ("Scale of guards", "floors/steps on the quantity's own scale; rerun at nM and 1e12, rtol 1e-2 and 1e-12"),
-    ("Remedies run", "every remedy a message or doc recommends, run on every control, at its edges (0, dominance)"),
+    ("Remedies run", "every remedy a message or doc recommends, run as written on every control, at its edges (0, dominance), and on a derived input (an initial condition that is an expression of the parameter: #1723)"),
     ("New refusals", "corpus sweep: nothing main ran is now refused; nothing main refused now returns silently wrong"),
     ("Main moved", "re-run the suite after the final rebase; 'claims cite the current main' lists the shas to recheck"),
     ("Other platforms", "Docker linux/amd64 (CMAKE_BUILD_PARALLEL_LEVEL=2); Windows via windows-tail dispatch when the legs miss the tests"),
@@ -1932,6 +1968,7 @@ def main():
     check_untouched_readers(b)
     check_py310(b)
     check_engine_math(b)
+    check_message_remedies(b)
     check_negative_only_tests(b)
     check_test_bngpath(b)
     check_docs_claims(b, a.issue)
