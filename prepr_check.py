@@ -36,6 +36,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -1751,6 +1752,77 @@ def check_full(b: Branch, docs_python: str | None):
            "a docstring needs local sphinx -W")
 
 
+# ─── 2026-11-20: the branch merged with main (#1753) ─────────────────────────
+
+
+def merged_test_files(b: Branch) -> list[str]:
+    """The test files to run with the branch merged with main: those the branch
+    changes, and those main changed since the merge base. Two sides meet there:
+    on #1753 the branch added a refusal and main had pinned the refusal count in
+    a test file the branch never touched (30 against 29 only once merged)."""
+    pattern = re.compile(r"python/tests/test_\w+\.py$")
+    ours = [f for f in b.files if pattern.match(f)]
+    theirs = sh(["git", "diff", "--name-only", b.merge_base, b.base_ref, "--", "python/tests/"], b.repo).stdout.split()
+    files = []
+    for f in [*ours, *theirs]:
+        if not pattern.match(f) or f in files:
+            continue
+        on_either = any(sh(["git", "cat-file", "-e", f"{ref}:{f}"], b.repo).returncode == 0
+                        for ref in ("HEAD", b.base_ref))
+        if on_either:  # a file deleted on both sides is not run
+            files.append(f)
+    return files
+
+
+def default_docker_cli() -> Path:
+    """bngsim-docker's CLI, cloned beside this repository (or BNGSIM_DOCKER_CLI)."""
+    env = os.environ.get("BNGSIM_DOCKER_CLI")
+    return Path(env) if env else Path(__file__).resolve().parent.parent / "bngsim-docker" / "bngsim_docker.py"
+
+
+def check_merged_run(b: Branch, cli: Path, arch: str):
+    """Run the test files where the two sides meet, in a Linux container, on the
+    branch's commit merged with main (bngsim-docker's test --merge-main), as CI
+    tests a pull request. A failure that is the tree's, or a merge that
+    conflicts, fails the gate."""
+    name = "tests pass merged with main (Docker)"
+    lesson = "#1753: two branches that each pass can fail together; CI tests the merge"
+    if not cli.is_file():
+        record("SKIP", name, f"no bngsim-docker CLI at {cli} (clone it beside this repository, or set BNGSIM_DOCKER_CLI)")
+        return
+    files = merged_test_files(b)
+    if not files:
+        record("SKIP", name, "no test file changed on either side since the merge base")
+        return
+    out = stamp_path(b.repo).parent / "prepr-merged"
+    remote = b.base_ref.split("/", 1)[0] if "/" in b.base_ref else "origin"
+    cmd = [sys.executable, str(cli), "test", "--tree", str(b.repo), "--merge-main", "--remote", remote,
+           "--arch", arch, "--out", str(out), "--tests", *files]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    except subprocess.TimeoutExpired:
+        record("FAIL", name, f"no result in two hours ({out})", lesson)
+        return
+    said = r.stdout + r.stderr
+    if "does not merge" in said:
+        why = next(ln for ln in said.splitlines() if "does not merge" in ln)
+        record("FAIL", name, why.strip()[:200], lesson)
+        return
+    log = (out / "docker.log").read_text(errors="replace") if (out / "docker.log").is_file() else ""
+    merged = next((ln.strip() for ln in said.splitlines() if ln.startswith("testing ")), "merged with main")
+    summary = next((ln.split(":", 1)[1].strip() for ln in log.splitlines() if ln.startswith("summary:")), "")
+    new = [ln.strip()[5:] for ln in log.splitlines() if ln.strip().startswith("NEW: ")]
+    if r.returncode == 0:
+        record("PASS", name, f"{len(files)} test file(s), {merged}: {summary}")
+    elif new:
+        more = f"; and {len(new) - 4} more" if len(new) > 4 else ""
+        record("FAIL", name, f"{merged}: {len(new)} failure(s) the tree's: " + "; ".join(new[:4]) + more
+               + f" (logs: {out})", lesson)
+    else:
+        record("FAIL", name, f"the run did not finish: {(said.strip().splitlines() or ['no output'])[-1][:150]} "
+               f"(logs: {out})", lesson)
+
+
 MANUAL = [
     ("Siblings", "every engine/route/loader that reads the same thing: run, run_batch, parameter_scan, bifurcate, steady_state(_batch), sensitivities, clones, continued runs, SSA/PSA/NFsim/RuleMonkey/JAX, codegen cc/MIR — each fixed, tested or 'unaffected because'"),
     ("Cost at scale", "paired interleaved timing vs main on the issue's model AND a large one (and a pathological one: cycles, deep nesting, 2,000 rows/stops); gate new walks on a cheap predicate"),
@@ -1794,6 +1866,12 @@ def main():
     ap.add_argument("--comment", type=Path, help="lint a drafted PR comment and exit")
     ap.add_argument("--full", action="store_true", help="also run pre-commit --all-files and sphinx -W (slow)")
     ap.add_argument("--docs-python", help="an interpreter with docs/requirements-ci.txt, for --full's sphinx -W")
+    ap.add_argument("--merged", action="store_true",
+                    help="run the test files either side changed, merged with main, in bngsim-docker's container (slow)")
+    ap.add_argument("--docker-cli", type=Path, default=None,
+                    help="bngsim-docker's bngsim_docker.py (default: beside this repository, or BNGSIM_DOCKER_CLI)")
+    ap.add_argument("--merged-arch", choices=("amd64", "arm64"), default=None,
+                    help="the image for --merged (default: the host's, so it is not emulated)")
     ap.add_argument("--check-stamp", action="store_true",
                     help="exit 0 only if the gate last passed on this HEAD, tree and body; run just before pushing")
     a = ap.parse_args()
@@ -1887,6 +1965,9 @@ def main():
         check_linux_list(b, a.evidence)
     if a.full:
         check_full(b, a.docs_python)
+    if a.merged:
+        arch = a.merged_arch or ("arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64")
+        check_merged_run(b, a.docker_cli or default_docker_cli(), arch)
     claims = check_overclaims(b, body)
     check_scope_claims(b, body)
 

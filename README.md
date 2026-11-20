@@ -106,6 +106,7 @@ Every check exists because the gap it looks for reached a pull request. Some wer
 |---|---|
 | Thread read | A comment or review posted since the last push and not yet answered (`--thread-read` says it was read) |
 | `--full` | `pre-commit run --all-files`, and `sphinx -W` with `--docs-python` |
+| `--merged` | The branch failing only once merged with main, as CI tests it. It runs the test files either side changed since the merge base (the branch's, and main's) in [bngsim-docker](https://github.com/Montana/bngsim-docker)'s container, on the branch's commit merged with main (`test --merge-main`). A failure that is the tree's, or a merge that conflicts, fails the gate. From #1753: the branch added a refusal, main had pinned the refusal count in a test file the branch never touched, and the count failed only merged (30 against 29) |
 
 ### From a review of all 18 open pull requests
 
@@ -184,6 +185,7 @@ And some checks are heuristics. "Linux run covers the touched tests" matches fun
 | `--base REF` | What the branch's diff is read against (default `origin/main`); for a stacked branch, the head underneath |
 | `--main-pkg DIR --boot DIR` | The older route: main's package directory, and the directory with the `sitecustomize` that points pytest's workers at it (or set `$BNGSIM_AB_BOOT`) |
 | `--full`, `--docs-python PY` | Also run pre-commit on all files, and `sphinx -W` with that interpreter |
+| `--merged`, `--docker-cli PATH`, `--merged-arch` | Run the test files where the branch and main meet, merged with main, in a Linux container. The CLI is bngsim-docker's `bngsim_docker.py`, cloned beside this repository by default (or `$BNGSIM_DOCKER_CLI`); the image is the host's architecture by default, so it is not emulated. The logs go to the git directory's `prepr-merged/`, never into the worktree |
 | `--pr N`, `--thread-read` | The open pull request this branch updates, and that its new comments have been read |
 | `--check-stamp` | Only compare against the last passing run's stamp |
 | `--comment FILE` | Lint a drafted pull-request comment, and exit |
@@ -277,6 +279,7 @@ bngsim-docker also has what `linux_check.py` does not:
 | Failures sorted against main | `--compare-main` | `compare`, or `test` against a list of standing failures |
 | Compiler cache between runs | | a ccache volume per image: a second run of bngsim main (build plus one test file) took 90 s, against 483 s cold |
 | Docker Compose services | | `suite`, `suite-ubuntu`, `suite-bionetgen`, `shell` |
+| The branch merged with main, or a pull request's head | | `--merge-main`, `--pr N` (the gate's `--merged` runs it) |
 
 ## `kink_check.py`
 
